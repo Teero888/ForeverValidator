@@ -1911,6 +1911,8 @@ __device__ DeviceConditionValue ConditionSource(
     case CudaSearchConditionValue::LastImprovementTime: return {lastImprovementTimeSeconds};
     case CudaSearchConditionValue::LastRestartTime: return {lastRestartTimeSeconds};
     case CudaSearchConditionValue::CurrentTime: return {currentTimeSeconds};
+    case CudaSearchConditionValue::CheckpointCount:
+        return {static_cast<double>(state.race.progress.checkpointCount)};
     default: break;
     }
     const std::uint32_t raw = static_cast<std::uint32_t>(source);
