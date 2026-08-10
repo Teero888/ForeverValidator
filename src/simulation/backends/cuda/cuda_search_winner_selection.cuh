@@ -16,6 +16,7 @@ struct DeviceSample {
     std::uint64_t logicalOrder = UINT64_MAX;
     std::uint32_t candidateSlot = InvalidCandidateSlot;
     std::uint32_t evaluationTick = 0u;
+    std::uint32_t eventCount = UINT32_MAX;
     bool valid = false;
     bool mutation = false;
     bool preciseFinish = false;
@@ -39,6 +40,9 @@ struct BetterSample {
             }
             return left.score < right.score ? left : right;
         }
+        if (left.eventCount != right.eventCount) {
+            return left.eventCount < right.eventCount ? left : right;
+        }
         return left.logicalOrder <= right.logicalOrder ? left : right;
     }
 };
@@ -53,8 +57,11 @@ __host__ __device__ inline bool StrictlyBetter(
     if (!incumbent.valid) {
         return true;
     }
-    return maximize ? candidate.score > incumbent.score
-                    : candidate.score < incumbent.score;
+    if (candidate.score != incumbent.score) {
+        return maximize ? candidate.score > incumbent.score
+                        : candidate.score < incumbent.score;
+    }
+    return candidate.eventCount < incumbent.eventCount;
 }
 
 }  // namespace forevervalidator::simulation::cuda_search_detail

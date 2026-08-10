@@ -2548,6 +2548,9 @@ __global__ void GenerateSearchCandidatesKernel(
                     ++mutationCount;
                 }
             }
+            if (eventCount != baselineInputCount) {
+                mutationCount += immutableTailInputCount;
+            }
             eventCounts[slot] = eventCount;
             mutationCounts[slot] = mutationCount;
             activeCandidates[slot] = mutationCount != 0u;
@@ -2924,6 +2927,7 @@ __global__ __launch_bounds__(
         sample.candidateId = candidateId;
         sample.candidateSlot = slot;
         sample.evaluationTick = evaluationIndex;
+        sample.eventCount = eventCount;
         sample.logicalOrder =
                 1u +
                 static_cast<std::uint64_t>(slot) *
@@ -5913,6 +5917,7 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
             sample.preciseFinish = incumbent.preciseFinish;
             const std::uint32_t eventCount = static_cast<std::uint32_t>(
                     preparedConfiguration.baselineInputs.size());
+            sample.eventCount = eventCount;
             error = cudaMemcpy(
                     impl->globalBestSample.Get(), &sample, sizeof(sample),
                     cudaMemcpyHostToDevice);

@@ -29,6 +29,7 @@ bool Equal(const DeviceSample &left, const DeviceSample &right) {
            left.logicalOrder == right.logicalOrder &&
            left.candidateSlot == right.candidateSlot &&
            left.evaluationTick == right.evaluationTick &&
+           left.eventCount == right.eventCount &&
            left.valid == right.valid &&
            left.mutation == right.mutation;
 }
@@ -83,7 +84,8 @@ DeviceSample Sample(
         std::uint32_t tick,
         std::uint32_t tickCount,
         double score,
-        bool valid = true) {
+        bool valid = true,
+        std::uint32_t eventCount = 10u) {
     DeviceSample sample;
     sample.score = score;
     sample.timeMs = 1000.0 + tick * 10.0;
@@ -94,6 +96,7 @@ DeviceSample Sample(
             1u + static_cast<std::uint64_t>(slot) * tickCount + tick;
     sample.candidateSlot = slot;
     sample.evaluationTick = tick;
+    sample.eventCount = eventCount;
     sample.valid = valid;
     sample.mutation = true;
     return sample;
@@ -194,6 +197,41 @@ bool CheckCandidateImprovementSemantics() {
            CheckEquivalent("candidate improvements", history, false);
 }
 
+bool CheckInputCountTieBreak() {
+    constexpr std::uint32_t TickCount = 1u;
+    DeviceSample incumbent = Sample(
+            InvalidCandidateSlot, 0u, TickCount, 4.0,
+            true, 10u);
+    incumbent.logicalOrder = 0u;
+    incumbent.candidateSlot = InvalidCandidateSlot;
+    incumbent.mutation = false;
+
+    const DeviceSample smaller = Sample(
+            0u, 0u, TickCount, 4.0, true, 9u);
+    const DeviceSample larger = Sample(
+            1u, 0u, TickCount, 4.0, true, 11u);
+    const DeviceSample sameSize = Sample(
+            2u, 0u, TickCount, 4.0, true, 10u);
+
+    for (const bool maximize : {false, true}) {
+        BetterSample better{maximize};
+        if (!Equal(better(incumbent, smaller), smaller) ||
+            !StrictlyBetter(smaller, incumbent, maximize) ||
+            !Equal(better(incumbent, larger), incumbent) ||
+            StrictlyBetter(larger, incumbent, maximize) ||
+            !Equal(better(incumbent, sameSize), incumbent) ||
+            StrictlyBetter(sameSize, incumbent, maximize)) {
+            return false;
+        }
+    }
+
+    History history;
+    history.incumbent = incumbent;
+    history.candidates = {{larger}, {smaller}, {sameSize}};
+    return CandidateImprovementCount(history, false) == 1u &&
+           CandidateImprovementCount(history, true) == 1u;
+}
+
 bool CheckLargeDimensionsAndDeterminism() {
     constexpr std::uint32_t CandidateCount = 1024u;
     constexpr std::uint32_t TickCount = 4096u;
@@ -230,6 +268,7 @@ int main() {
     if (!CheckEvaluatorKinds() ||
         !CheckTiesAndInvalidCandidates() ||
         !CheckCandidateImprovementSemantics() ||
+        !CheckInputCountTieBreak() ||
         !CheckLargeDimensionsAndDeterminism()) {
         return 1;
     }
