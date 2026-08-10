@@ -68,11 +68,11 @@ CudaBackendDiagnostics QueryCompiledCudaRuntimeDiagnostics() noexcept {
     result.totalGlobalMemoryBytes =
             static_cast<std::uint64_t>(properties.totalGlobalMem);
     result.deviceName = properties.name;
-    if (properties.major < 7 ||
-        (properties.major == 7 && properties.minor < 5)) {
+    if (!CudaBackendDiagnostics::SupportsComputeCapability(
+            properties.major, properties.minor)) {
         result.status = CudaBackendStatus::UnsupportedDevice;
         result.diagnostic =
-                "CUDA backend requires compute capability 7.5 or newer";
+                "CUDA backend requires compute capability 5.0 or newer";
         return result;
     }
     error = cudaFree(nullptr);

@@ -44,6 +44,24 @@ int main() {
         std::cerr << "Cuda was not registered as selectable\n";
         return 1;
     }
+    if (!forevervalidator::CudaBackendDiagnostics::
+                    SupportsComputeCapability(5, 0) ||
+        !forevervalidator::CudaBackendDiagnostics::
+                    SupportsComputeCapability(6, 1) ||
+        forevervalidator::CudaBackendDiagnostics::
+                    SupportsComputeCapability(4, 9)) {
+        std::cerr << "regular CUDA compute-capability floor is incorrect\n";
+        return 1;
+    }
+    if (forevervalidator::CudaBackendDiagnostics::
+                    SupportsSessionSpecializationComputeCapability(5, 0) ||
+        forevervalidator::CudaBackendDiagnostics::
+                    SupportsSessionSpecializationComputeCapability(7, 4) ||
+        !forevervalidator::CudaBackendDiagnostics::
+                    SupportsSessionSpecializationComputeCapability(7, 5)) {
+        std::cerr << "fast CUDA compute-capability floor is incorrect\n";
+        return 1;
+    }
     const forevervalidator::CudaBackendDiagnostics cuda =
             forevervalidator::QueryCudaBackendDiagnostics();
 #if FOREVERVALIDATOR_HAS_CUDA

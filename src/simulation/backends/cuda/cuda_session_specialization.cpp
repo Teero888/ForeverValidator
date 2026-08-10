@@ -1,5 +1,7 @@
 #include "simulation/backends/cuda/cuda_session_specialization.h"
 
+#include <forevervalidator/validation.h>
+
 #include <nvJitLink.h>
 #include <nvrtc.h>
 #include <cuda_runtime_api.h>
@@ -277,6 +279,26 @@ bool SessionModule::Build(
     Reset();
     const auto started = std::chrono::steady_clock::now();
 
+    int device = 0;
+    cudaDeviceProp properties{};
+    if (cudaGetDevice(&device) != cudaSuccess ||
+        cudaGetDeviceProperties(&properties, device) != cudaSuccess) {
+        if (diagnostic != nullptr) {
+            *diagnostic = "querying CUDA device for session specialization";
+        }
+        return false;
+    }
+    if (!forevervalidator::CudaBackendDiagnostics::
+                SupportsSessionSpecializationComputeCapability(
+                        properties.major, properties.minor)) {
+        if (diagnostic != nullptr) {
+            *diagnostic =
+                    "Fast CUDA requires compute capability 7.5 or newer; "
+                    "regular CUDA remains available";
+        }
+        return false;
+    }
+
     std::vector<unsigned char> collisionShapes(
             static_cast<std::size_t>(
                     configuration.collisionShapes.count) *
@@ -428,15 +450,6 @@ bool SessionModule::Build(
     }
     nvrtcDestroyProgram(&program);
 
-    int device = 0;
-    cudaDeviceProp properties{};
-    if (cudaGetDevice(&device) != cudaSuccess ||
-        cudaGetDeviceProperties(&properties, device) != cudaSuccess) {
-        if (diagnostic != nullptr) {
-            *diagnostic = "querying CUDA device for session specialization";
-        }
-        return false;
-    }
     const std::string architecture =
             "-arch=sm_" + std::to_string(properties.major) +
             std::to_string(properties.minor);

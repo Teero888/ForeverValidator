@@ -25,11 +25,14 @@ cmake -S . -B build/cuda -G Ninja \
 cmake --build build/cuda
 ```
 
-The runtime requires an NVIDIA device with compute capability 7.5 or newer.
+The regular CUDA runtime requires an NVIDIA device with compute capability
+5.0 or newer.
 The default CMake configuration compiles for the build machine's native
 architecture; release builders can set `CMAKE_CUDA_ARCHITECTURES` explicitly.
 Device discovery reports the selected device, compute capability, driver and
-runtime versions, and global memory. A missing toolkit, runtime, device, or
+runtime versions, and global memory. The optional session-specialized fast
+search kernel requires compute capability 7.5 or newer; older supported GPUs
+use the regular CUDA search kernel. A missing toolkit, runtime, device, or
 supported architecture produces a typed CUDA error. A CPU-only executable
 rejects `Cuda` with `cuda_not_compiled`.
 

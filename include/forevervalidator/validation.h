@@ -64,8 +64,28 @@ struct CudaBackendDiagnostics {
     std::string deviceName;
     std::string diagnostic;
 
+    static bool SupportsComputeCapability(
+            std::int32_t major,
+            std::int32_t minor) noexcept {
+        static_cast<void>(minor);
+        return major >= 5;
+    }
+
+    static bool SupportsSessionSpecializationComputeCapability(
+            std::int32_t major,
+            std::int32_t minor) noexcept {
+        return major > 7 || (major == 7 && minor >= 5);
+    }
+
     bool IsReady() const noexcept {
         return status == CudaBackendStatus::Ready;
+    }
+
+    bool SupportsSessionSpecialization() const noexcept {
+        return IsReady() &&
+                SupportsSessionSpecializationComputeCapability(
+                        computeCapabilityMajor,
+                        computeCapabilityMinor);
     }
 };
 
