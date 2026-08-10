@@ -743,7 +743,10 @@ private:
             if (mip != nullptr) {
                 for (u32 level = 0u; level < mip->LevelCount(); ++level) {
                     if (mip->LevelTree(level) == child) {
-                        childLod = level;
+                        childLod = PhysicsSandboxRenderLodLevelForVisualMip(
+                                lodLevel, level,
+                                static_cast<std::uint32_t>(
+                                        mip->LevelCount()));
                         childFar = mip->LevelFarZ(level);
                         break;
                     }
@@ -840,6 +843,18 @@ ReplayControlTick CandidateControlTick(
 void ClassifyPhysicsSandboxRenderLayers(
         sandbox::PhysicsSandboxRenderScene &scene) {
     ClassifyRenderLayers(scene);
+}
+
+std::uint32_t PhysicsSandboxRenderLodLevelForVisualMip(
+        std::uint32_t parentLodLevel,
+        std::uint32_t mipLevel,
+        std::uint32_t mipLevelCount) {
+    if (mipLevelCount == 0u || mipLevel >= mipLevelCount) {
+        return parentLodLevel;
+    }
+    const std::uint32_t localLodLevel =
+            mipLevelCount - 1u - mipLevel;
+    return std::max(parentLodLevel, localLodLevel);
 }
 
 struct ReplaySimulationInstance {

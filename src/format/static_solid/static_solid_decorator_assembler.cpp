@@ -6,6 +6,24 @@
 #include "format/static_solid/static_solid_archive_graph.h"
 #include "format/static_solid/static_solid_archive_node_kind.h"
 #include <new>
+
+void ApplyStaticSolidDecoratorTreeQuality(
+        CPlugTree *target,
+        const CGameCtnReplayStaticSolidDecoratorTreeDeclaration &declaration,
+        u32 quality) {
+    if (target == nullptr) {
+        return;
+    }
+
+    const bool shown = declaration.IsShownAtQuality(quality) != 0;
+    target->ApplyDecorationFlags(
+            shown && declaration.IsVisibleAtQuality(quality),
+            shown && declaration.CastsShadowsAtQuality(quality),
+            shown && declaration.HasCollisionAtQuality(quality),
+            declaration.AppliesVisibleToChildren(),
+            declaration.AppliesCasterToChildren());
+}
+
 void StaticSolidDecoratorAssembler::Free() {
     generatedSurfaces.Free();
     declarations.clear();
@@ -15,19 +33,8 @@ void StaticSolidDecoratorAssembler::ApplyTreeProperties(
         CPlugTree *target,
         const CGameCtnReplayStaticSolidDecoratorTreeDeclaration
                 &declaration) {
-    if (target == nullptr) {
-        return;
-    }
-    const u32 quality = (2u);
-    if (!declaration.IsShownAtQuality(quality)) {
-        return;
-    }
-
-    target->ApplyDecorationFlags(declaration.IsVisibleAtQuality(quality),
-                                 declaration.CastsShadowsAtQuality(quality),
-                                 declaration.HasCollisionAtQuality(quality),
-                                 declaration.AppliesVisibleToChildren(),
-                                 declaration.AppliesCasterToChildren());
+    ApplyStaticSolidDecoratorTreeQuality(
+            target, declaration, StaticSolidHighestDecoratorQuality);
 }
 
 CPlugSurface *StaticSolidDecoratorAssembler::
@@ -89,7 +96,7 @@ int StaticSolidDecoratorAssembler::CollectSources(
     }
     requests->Clear();
 
-    const u32 quality = (2u);
+    const u32 quality = StaticSolidHighestDecoratorQuality;
     int ok = 1;
     for (const CGameCtnReplayStaticSolidDecoratorTreeDeclaration
                  &declaration : declarations) {

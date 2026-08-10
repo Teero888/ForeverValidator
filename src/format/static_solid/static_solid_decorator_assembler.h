@@ -9,6 +9,13 @@
 #include "format/static_solid/static_solid_generated_surfaces.h"
 class StaticSolidArchiveLoadSession;
 
+inline constexpr u32 StaticSolidHighestDecoratorQuality = 2u;
+
+void ApplyStaticSolidDecoratorTreeQuality(
+        CPlugTree *target,
+        const CGameCtnReplayStaticSolidDecoratorTreeDeclaration &declaration,
+        u32 quality);
+
 class StaticSolidDecoratorAssembler {
 public:
     void Free();

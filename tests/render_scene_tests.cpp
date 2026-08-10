@@ -3,6 +3,7 @@
 #include "engine/game/game_ctn_block_info.h"
 #include "engine/rendering/plug_tree.h"
 #include "engine/scene/static_scene_model.h"
+#include "format/static_solid/static_solid_decorator_assembler.h"
 #include "format/static_solid/static_solid_geometry_decoder.h"
 #include "simulation/replay/replay_scene_surface_resolution.h"
 #include "simulation/runtime/replay_simulation_session.h"
@@ -11,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <type_traits>
 #include <utility>
@@ -173,6 +175,56 @@ bool TestTransformComposition() {
             "tree local transform was not composed with its parent");
 }
 
+bool TestHighestQualityVisualSelection() {
+    CPlugTreeVisualMip mip;
+    mip.AddOwnedLevel(std::make_unique<CPlugTree>(), 100.0f);
+    mip.AddOwnedLevel(
+            std::make_unique<CPlugTree>(),
+            std::numeric_limits<float>::max());
+    mip.SetQuality(100u);
+
+    bool okay = Check(
+            mip.GetChildToRenderMip() == mip.LevelTree(1u),
+            "highest visual MIP quality did not select the last level");
+    okay &= Check(
+            PhysicsSandboxRenderLodLevelForVisualMip(0u, 1u, 2u) == 0u &&
+                    PhysicsSandboxRenderLodLevelForVisualMip(0u, 0u, 2u) ==
+                            1u,
+            "visual MIP levels were not ranked from highest quality");
+    okay &= Check(
+            PhysicsSandboxRenderLodLevelForVisualMip(1u, 1u, 2u) == 1u,
+            "nested visual MIP reset a lower-detail ancestor to LOD zero");
+
+    CGameCtnReplayStaticSolidDecoratorTreeDeclaration lowOnly;
+    lowOnly.SetVisibilityConditions(1u, 6u, 1u, 6u, 1u, 6u);
+    lowOnly.SetCollisionCondition(6u);
+    CPlugTree excluded;
+    excluded.SetIsVisible(1);
+    excluded.SetShadowCaster(true);
+    excluded.SetCollisionEnabled(true);
+    ApplyStaticSolidDecoratorTreeQuality(
+            &excluded, lowOnly, StaticSolidHighestDecoratorQuality);
+    okay &= Check(
+            !excluded.IsVisible() && !excluded.IsShadowCaster() &&
+                    !excluded.State().collisionEnabled,
+            "lower-quality decorator tree remained active at highest quality");
+
+    CGameCtnReplayStaticSolidDecoratorTreeDeclaration highOnly;
+    highOnly.SetVisibilityConditions(5u, 5u, 0u, 5u, 0u, 5u);
+    highOnly.SetCollisionCondition(5u);
+    CPlugTree included;
+    included.SetIsVisible(0);
+    included.SetShadowCaster(false);
+    included.SetCollisionEnabled(false);
+    ApplyStaticSolidDecoratorTreeQuality(
+            &included, highOnly, StaticSolidHighestDecoratorQuality);
+    okay &= Check(
+            included.IsVisible() && included.IsShadowCaster() &&
+                    included.State().collisionEnabled,
+            "highest-quality decorator tree was not activated");
+    return okay;
+}
+
 bool TestProvenanceAndImmutableScene() {
     GmIso4 identity;
     identity.SetIdentity();
@@ -320,6 +372,7 @@ bool TestClipJunctionSourceResolution() {
 int main() {
     bool okay = TestUvDecoding();
     okay &= TestTransformComposition();
+    okay &= TestHighestQualityVisualSelection();
     okay &= TestProvenanceAndImmutableScene();
     okay &= TestGenericBackgroundLayerClassification();
     okay &= TestClipJunctionSourceResolution();

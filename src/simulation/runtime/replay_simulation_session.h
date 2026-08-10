@@ -90,6 +90,11 @@ std::uint64_t ReplaySimulationInstanceSemanticHash(
 void ClassifyPhysicsSandboxRenderLayers(
         forevervalidator::experimental::PhysicsSandboxRenderScene &scene);
 
+std::uint32_t PhysicsSandboxRenderLodLevelForVisualMip(
+        std::uint32_t parentLodLevel,
+        std::uint32_t mipLevel,
+        std::uint32_t mipLevelCount);
+
 class ReplaySimulationSession {
 public:
     explicit ReplaySimulationSession(
