@@ -204,7 +204,7 @@ ReducedAngle ReduceAngle(float input) {
     };
 }
 
-uint64_t RoundPositiveToNearestEven(double value) {
+[[maybe_unused]] uint64_t RoundPositiveToNearestEven(double value) {
     const uint64_t whole = static_cast<uint64_t>(value);
     const double fraction = value - static_cast<double>(whole);
     return whole + (fraction > 0.5 || (fraction == 0.5 && (whole & 1u) != 0u));
@@ -224,44 +224,9 @@ NativeSqrtScope::~NativeSqrtScope(void) {
 }
 
 float FromDouble(double value) {
-    if (std::isnan(value)) {
+    if (std::isnan(value))
         return std::copysign(QuietNaN(), value);
-    }
-    if (std::isinf(value)) {
-        return std::copysign(std::numeric_limits<float>::infinity(), value);
-    }
-    if (value == 0.0) {
-        return (std::copysign(0.0f, (value)));
-    }
-
-    const double magnitude = std::fabs(value);
-    int binaryExponent = 0;
-    const double fraction = std::frexp(magnitude, &binaryExponent);
-    int exponent = binaryExponent - 1;
-    if (exponent > 127) {
-        return std::copysign(std::numeric_limits<float>::infinity(), value);
-    }
-
-    if (exponent >= -126) {
-        uint64_t significand = RoundPositiveToNearestEven(std::ldexp(fraction, 24));
-        if (significand == (uint64_t{1} << 24u)) {
-            significand >>= 1u;
-            exponent++;
-            if (exponent > 127) {
-                return std::copysign(std::numeric_limits<float>::infinity(), value);
-            }
-        }
-        return std::copysign(
-                static_cast<float>(std::ldexp(static_cast<double>(significand), exponent - 23)),
-                value);
-    }
-
-    const uint64_t significand = RoundPositiveToNearestEven(std::ldexp(magnitude, 149));
-    if (significand == 0u) {
-        return (std::copysign(0.0f, (value)));
-    }
-    return std::copysign(static_cast<float>(std::ldexp(static_cast<double>(significand), -149)),
-                         value);
+    return static_cast<float>(value);
 }
 
 float FromUnsignedInteger(uint32_t value) { return FromDouble(static_cast<double>(value)); }
