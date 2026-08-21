@@ -102,6 +102,21 @@ function(forevervalidator_configure_target target)
             "$<$<COMPILE_LANGUAGE:CXX>:-ffp-contract=off>"
             "$<$<COMPILE_LANGUAGE:CXX>:-frandom-seed=forevervalidator>"
             "$<$<COMPILE_LANGUAGE:CXX>:-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=.>")
+        # Raise the baseline off plain x86-64 so scalar float code gets VEX
+        # encoding: three-operand forms need fewer register copies for identical
+        # arithmetic. Skipped when the host already asked for -march=native,
+        # which is strictly wider. -mno-fma is required, not optional --
+        # -ffp-contract=off governs expressions written here, but clang
+        # synthesises fmod as x - trunc(x/y)*y and fuses that regardless.
+        if(FOREVERVALIDATOR_RAISE_ISA_BASELINE AND NOT ENABLE_AGGRESSIVE_OPTIM)
+            target_compile_options(${target} PRIVATE
+                "$<$<COMPILE_LANGUAGE:CXX>:-march=x86-64-v3>"
+                "$<$<COMPILE_LANGUAGE:CXX>:-mno-fma>")
+            # With -flto the code generation happens at the link, where the
+            # compile-time flags do not apply, so restate them there.
+            target_link_options(${target} PRIVATE
+                "-ffp-contract=off" "-march=x86-64-v3" "-mno-fma")
+        endif()
     endif()
 endfunction()
 

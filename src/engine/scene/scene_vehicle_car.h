@@ -293,10 +293,10 @@ public:
   float GetRouletteCurrentBoostFactor(void) const;
   void SetTurboRouletteTickOrigin(unsigned long tick);
   float GetMaxSpeed(void);
-  void OnEnterScene(void) override;
-  void VehicleReset(void) override;
-  void VehicleBlockSpeedSet(int isBlocked) override;
-  void VehicleBlockSpeed2Set(int isBlocked) override;
+  void OnEnterScene(void) override final;
+  void VehicleReset(void) override final;
+  void VehicleBlockSpeedSet(int isBlocked) override final;
+  void VehicleBlockSpeed2Set(int isBlocked) override final;
   virtual void VehicleFreeWheelingSet(int isFreeWheeling);
   void BeginRaceSimulation(void);
   void AfterContacts(void);
@@ -304,10 +304,10 @@ public:
   virtual void OtherUpdateAsync(void);
   virtual void OtherVehicleForces(void);
   virtual void OtherVehiclePhysics(void);
-  void UpdateParamsFromTuning(void) override;
-  const CSceneVehicle::SVehicleState &VehicleStateAsyncGet(void) const override;
+  void UpdateParamsFromTuning(void) override final;
+  const CSceneVehicle::SVehicleState &VehicleStateAsyncGet(void) const override final;
   const CSceneVehicle::SVehicleState &
-  VehicleStatePrevAsyncGet(void) const override;
+  VehicleStatePrevAsyncGet(void) const override final;
   void ComputeAndApplyContactImpulse(float restitution, const GmVec3 &speed,
                                      const GmVec3 &normal, const GmVec3 &point);
   void SetWheelCount(u32 wheelCount);
@@ -338,8 +338,8 @@ public:
   void RestoreRuntimeClone(const RuntimeClone &clone) noexcept;
 
 protected:
-  void HmsComputeForces(float dt) override;
-  void HmsAfterContacts(void) override;
+  void HmsComputeForces(float dt) override final;
+  void HmsAfterContacts(void) override final;
   void AddVehicleForce(const GmVec3 &force, const GmVec3 &point);
   void AddVehicleCentralForce(const GmVec3 &force);
   void AddVehicleTorque(const GmVec3 &torque);
@@ -382,9 +382,9 @@ protected:
   void ComputeAirControl(const GmVec3 &angularSpeed, unsigned long tick,
                          int isGroundContact, int resetMemory);
   int ApplyWaterForces(const GmVec3 &forceToSubtract);
-  void AbsorbContact(CHmsPhysicalContact &contact) override;
+  void AbsorbContact(CHmsPhysicalContact &contact) override final;
   void ComputeAsyncState(void);
-  void VehicleUpdateAsync(void) override;
+  void VehicleUpdateAsync(void) override final;
   void
   ComputeVehicleGroundMaterialVals(CSceneVehicleMaterial::SBlendableVals &out,
                                    int &hasMaterial);
@@ -428,7 +428,7 @@ protected:
                                         float vehicleForwardSpeed, float dt);
 
 protected:
-  void VehicleInitFromSolid(void) override;
+  void VehicleInitFromSolid(void) override final;
   void GetLateralFriction(const GmVec3 &linearSpeed, const GmVec3 &direction,
                           CSceneVehicleMaterial::SBlendableVals *materialVals,
                           float slopeAdherenceA, int alreadySlipping,
@@ -683,11 +683,11 @@ private:
 
 public:
   unsigned long WheelGetCount(void) const override final;
-  int WheelIsSliding(unsigned long wheelIndex) const override;
+  int WheelIsSliding(unsigned long wheelIndex) const override final;
   unsigned short
-  WheelGetContactMaterial(unsigned long wheelIndex) const override;
+  WheelGetContactMaterial(unsigned long wheelIndex) const override final;
   const GmVec3 &
-  WheelGetAsyncGroundContactPos(unsigned long wheelIndex) const override;
+  WheelGetAsyncGroundContactPos(unsigned long wheelIndex) const override final;
 };
 
 struct CSceneVehicleCar::SSimulationWheel {

@@ -43,7 +43,11 @@ To BitCopy(const From &value) noexcept {
 #if FOREVERVALIDATOR_HAS_X86_SSE2_BINARY32_PATH
 
 #define FOREVERVALIDATOR_TARGET_SSE2 __attribute__((target("sse2")))
-#define FOREVERVALIDATOR_NOINLINE __attribute__((noinline))
+// Was __attribute__((noinline)). _mm_cvtsd_ss and _mm_sqrt_ss each lower to a
+// single instruction and are not subject to reassociation or contraction, and
+// -ffp-contract=off is set project-wide, so letting LTO inline these does not
+// move a result bit. ComputeForces alone calls the narrowing shim 61 times.
+#define FOREVERVALIDATOR_NOINLINE
 
 constexpr unsigned int MxcsrControlMask = 0xffc0u;
 constexpr unsigned int DeterministicMxcsrControl = 0x1f80u;
