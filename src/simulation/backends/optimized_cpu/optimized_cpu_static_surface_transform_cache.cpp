@@ -99,6 +99,14 @@ bool OptimizedCpuMovingEllipsoidPacketPlan::TryBuild(
         return false;
     }
     candidate.directLaneStar_ = candidate.HasDirectLaneStarTopology();
+    candidate.directLanesUseLocalTransforms_ = candidate.directLaneStar_;
+    for (std::size_t laneIndex = 0u;
+         candidate.directLanesUseLocalTransforms_ &&
+                 laneIndex < candidate.laneCount_;
+         ++laneIndex) {
+        candidate.directLanesUseLocalTransforms_ =
+                candidate.nodes_[laneIndex + 1u].usesLocalTransform;
+    }
     *this = candidate;
     return true;
 }
@@ -214,6 +222,7 @@ void OptimizedCpuMovingEllipsoidPacketPlan::Clear(void) noexcept {
     laneCount_ = 0u;
     operationCount_ = 0u;
     directLaneStar_ = false;
+    directLanesUseLocalTransforms_ = false;
 }
 
 bool OptimizedCpuMovingEllipsoidPacketPlan::IsFor(

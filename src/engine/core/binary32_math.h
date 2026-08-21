@@ -48,15 +48,15 @@ inline float CIsinQuarterPi(void) noexcept {
 #if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || \
         defined(_M_X64)
 #if defined(__GNUC__) || defined(__clang__)
-    float numerator = 1.0f;
-    const float denominator = 3.0f;
+    float accumulator = 1.0f;
+    const float halfUlpAtOne = 0x1p-24f;
     // The exact CIsin(QuarterPi) path always raises only FE_INEXACT. A benign
-    // scalar division reproduces that sticky-status effect without the
+    // halfway scalar addition reproduces that sticky-status effect without the
     // serializing MXCSR read/conditional write; its rounded result is ignored.
     __asm__ volatile(
-            "divss %1, %0"
-            : "+x"(numerator)
-            : "x"(denominator));
+            "addss %1, %0"
+            : "+x"(accumulator)
+            : "x"(halfUlpAtOne));
 #else
     std::feraiseexcept(FE_INEXACT);
 #endif

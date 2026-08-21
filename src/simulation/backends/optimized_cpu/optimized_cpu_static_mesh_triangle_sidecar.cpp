@@ -341,7 +341,7 @@ bool BuildPacketGroups(
         const std::vector<std::uint8_t> &depths,
         std::vector<OptimizedCpuStaticMeshPacketCell> *packetCells,
         std::vector<OptimizedCpuStaticMeshPacketGroup> *groups) {
-    constexpr std::size_t GroupWidth = 4u;
+    constexpr std::size_t GroupWidth = 8u;
     constexpr std::size_t MaximumGroupCount =
             std::numeric_limits<std::uint16_t>::max();
     if (packetCells == nullptr || groups == nullptr ||
@@ -352,10 +352,10 @@ bool BuildPacketGroups(
     groups->reserve(std::min(cells.size() / GroupWidth,
                              MaximumGroupCount));
     // Every internal cell, not only the ones two levels down. A group is a
-    // conservative certificate over up to four consecutive sibling subtrees,
+    // conservative certificate over up to eight consecutive sibling subtrees,
     // and the test that reads it -- PacketGroupRejectsAll -- proves that every
     // active lane misses every member, which is true at any depth. Grouping the
-    // whole tree rather than one level of it turns four bounds tests into one
+    // whole tree rather than one level of it turns eight bounds tests into one
     // wherever a subtree is nowhere near the car, which in a traversal that
     // rejects three cells in four is most of the work.
     for (std::size_t parentIndex = 0u;
@@ -483,11 +483,13 @@ bool OptimizedCpuStaticMeshTriangleSidecar::TryBuild(
             return false;
         }
         rebuilt.traversalDepths_ = std::move(traversalDepths);
-        if (triangles.size() > rebuilt.triangles_.max_size()) {
+        if (triangles.size() > rebuilt.triangles_.max_size() ||
+            triangles.size() > rebuilt.packetTriangles_.max_size()) {
             Clear();
             return false;
         }
         rebuilt.triangles_.resize(triangles.size());
+        rebuilt.packetTriangles_.resize(triangles.size());
 
         std::vector<OptimizedCpuStaticUniformGrid::Entry> gridEntries;
         gridEntries.reserve(triangles.size());
@@ -540,6 +542,10 @@ bool OptimizedCpuStaticMeshTriangleSidecar::TryBuild(
             };
             cached.normal = source.normal;
             cached.material = source.material;
+            rebuilt.packetTriangles_[triangleIndex] = {
+                cached.vertices,
+                cached.material,
+            };
             const GmVec3 edge01 =
                     cached.vertices[1].SubtractForCollision(
                             cached.vertices[0]);
@@ -591,6 +597,7 @@ void OptimizedCpuStaticMeshTriangleSidecar::Clear(void) noexcept {
     traversalDepths_.clear();
     packetCells_.clear();
     packetGroups_.clear();
+    packetTriangles_.clear();
     triangles_.clear();
     directTrianglePostings_.clear();
     triangleGrid_.Clear();
@@ -614,5 +621,6 @@ bool OptimizedCpuStaticMeshTriangleSidecar::IsFor(
            sourceCellCount_ == cells.size() &&
            traversalDepths_.size() == cells.size() &&
            packetCells_.size() == cells.size() &&
+           packetTriangles_.size() == triangles.size() &&
            triangles_.size() == triangles.size();
 }

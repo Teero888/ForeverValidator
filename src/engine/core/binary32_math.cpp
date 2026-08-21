@@ -12,7 +12,12 @@
 #include "engine/core/binary32_math.h"
 namespace {
 
+#if defined(__ELF__) && (defined(__GNUC__) || defined(__clang__))
+thread_local __attribute__((tls_model("initial-exec")))
+        bool nativeSqrtEnabled = false;
+#else
 thread_local bool nativeSqrtEnabled = false;
+#endif
 
 constexpr double kPi = 3.14159265358979323846264338327950288;
 constexpr double kHalfPi = 1.57079632679489661923132169163975144;

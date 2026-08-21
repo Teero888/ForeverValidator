@@ -65,6 +65,13 @@ FOREVERVALIDATOR_TARGET_SSE2 unsigned int ReadMxcsrSse2() noexcept {
     return _mm_getcsr();
 }
 
+bool RoundsToNearestX87() noexcept {
+    unsigned short controlWord;
+    __asm__ __volatile__("fnstcw %0" : "=m"(controlWord));
+    constexpr unsigned short X87RoundingControlMask = 0x0c00u;
+    return (controlWord & X87RoundingControlMask) == 0u;
+}
+
 #endif
 
 }  // namespace
@@ -113,7 +120,7 @@ SelectOptimizedCpuBinary32MathPathForActiveExecution() noexcept {
 #if FOREVERVALIDATOR_HAS_X86_SSE2_BINARY32_PATH
     if (!HasSupportedBinaryFormats ||
         !tmnf::simulation::DeterministicExecutionScope::IsActive() ||
-        std::fegetround() != FE_TONEAREST || !CpuHasSse2()) {
+        !RoundsToNearestX87() || !CpuHasSse2()) {
         return OptimizedCpuBinary32MathPath::Reference;
     }
     if ((ReadMxcsrSse2() & MxcsrControlMask) !=

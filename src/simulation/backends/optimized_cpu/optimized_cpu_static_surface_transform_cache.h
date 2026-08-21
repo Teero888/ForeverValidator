@@ -78,6 +78,10 @@ public:
         return directLaneStar_;
     }
 
+    bool DirectLanesUseLocalTransforms(void) const noexcept {
+        return directLanesUseLocalTransforms_;
+    }
+
 private:
     bool TryAppendTree(const CPlugTree &tree,
                        std::uint8_t parentNodeIndex,
@@ -92,6 +96,7 @@ private:
     std::size_t laneCount_ = 0u;
     std::size_t operationCount_ = 0u;
     bool directLaneStar_ = false;
+    bool directLanesUseLocalTransforms_ = false;
 };
 
 class OptimizedCpuStaticSurfaceTransformGroup {

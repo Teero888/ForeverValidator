@@ -10,7 +10,24 @@ namespace tmnf::simulation {
 namespace {
 
 constexpr unsigned int DeterministicMxcsr = 0x1f80u;
+#if defined(__ELF__) && (defined(__GNUC__) || defined(__clang__))
+thread_local __attribute__((tls_model("initial-exec")))
+        unsigned int ActiveExecutionScopeCount = 0u;
+#else
 thread_local unsigned int ActiveExecutionScopeCount = 0u;
+#endif
+
+bool RoundsToNearest(void) noexcept {
+#if (defined(__i386__) || defined(__x86_64__)) && \
+        (defined(__GNUC__) || defined(__clang__))
+    unsigned short controlWord;
+    __asm__ __volatile__("fnstcw %0" : "=m"(controlWord));
+    constexpr unsigned short X87RoundingControlMask = 0x0c00u;
+    return (controlWord & X87RoundingControlMask) == 0u;
+#else
+    return std::fegetround() == FE_TONEAREST;
+#endif
+}
 
 }  // namespace
 
@@ -33,7 +50,7 @@ DeterministicExecutionScope::DeterministicExecutionScope() {
     // either way, and nothing under this scope executes a long-double
     // instruction, so the rest of what fnstenv saves cannot move. A search
     // takes one of these per simulated tick, so it shows up.
-    const bool roundsToNearest = std::fegetround() == FE_TONEAREST;
+    const bool roundsToNearest = RoundsToNearest();
     if (!roundsToNearest) {
         if (std::fegetenv(&savedEnvironment_) != 0) {
             return;
@@ -53,13 +70,9 @@ DeterministicExecutionScope::DeterministicExecutionScope() {
     }
 #if defined(__i386__) || defined(__x86_64__)
     _mm_setcsr(DeterministicMxcsr);
-    if (_mm_getcsr() != DeterministicMxcsr) {
-        Restore();
-        return;
-    }
 #endif
     // Only worth re-reading when the constructor actually asked for a change.
-    if (!roundsToNearest && std::fegetround() != FE_TONEAREST) {
+    if (!roundsToNearest && !RoundsToNearest()) {
         Restore();
         return;
     }
@@ -68,14 +81,6 @@ DeterministicExecutionScope::DeterministicExecutionScope() {
     ++ActiveExecutionScopeCount;
     ownsActiveScope_ = true;
     established_ = true;
-}
-
-DeterministicExecutionScope::~DeterministicExecutionScope() {
-    Restore();
-}
-
-bool DeterministicExecutionScope::Established() const noexcept {
-    return established_ && !restored_;
 }
 
 bool DeterministicExecutionScope::Restore() noexcept {
@@ -103,9 +108,6 @@ bool DeterministicExecutionScope::Restore() noexcept {
         }
 #if defined(__i386__) || defined(__x86_64__)
         _mm_setcsr(savedMxcsr_);
-        if (_mm_getcsr() != savedMxcsr_) {
-            success = false;
-        }
 #endif
     }
 

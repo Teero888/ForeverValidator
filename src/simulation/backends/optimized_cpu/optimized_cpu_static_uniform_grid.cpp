@@ -1,8 +1,10 @@
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_uniform_grid.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <new>
 #include <utility>
@@ -130,6 +132,7 @@ bool OptimizedCpuStaticUniformGrid::TryBuild(
         }
 
         double baseCellSize = 1.0;
+        int baseCellExponent = 0;
         for (;;) {
             const double inverse = 1.0 / baseCellSize;
             u32 ignored = 0u;
@@ -141,6 +144,7 @@ bool OptimizedCpuStaticUniformGrid::TryBuild(
                 break;
             }
             baseCellSize *= 2.0;
+            ++baseCellExponent;
             if (!std::isfinite(baseCellSize)) {
                 return false;
             }
@@ -150,6 +154,7 @@ bool OptimizedCpuStaticUniformGrid::TryBuild(
         rebuilt.originX_ = minimumX;
         rebuilt.originY_ = minimumY;
         rebuilt.originZ_ = minimumZ;
+        rebuilt.baseHalfCellExponent_ = baseCellExponent - 1;
         rebuilt.looseLevels_.reserve(LooseLevelCount);
 
         struct EntryRange {
@@ -181,7 +186,7 @@ bool OptimizedCpuStaticUniformGrid::TryBuild(
             }
 
             LooseLevel level;
-            level.cellSize = cellSize;
+            level.halfCellSize = cellSize * 0.5;
             level.inverseCellSize = inverse;
             level.dimensionX = dimensionX;
             level.dimensionY = dimensionY;
@@ -269,6 +274,7 @@ void OptimizedCpuStaticUniformGrid::Clear(void) noexcept {
     originX_ = 0.0;
     originY_ = 0.0;
     originZ_ = 0.0;
+    baseHalfCellExponent_ = 0;
     looseLevels_.clear();
 }
 
@@ -280,6 +286,12 @@ bool OptimizedCpuStaticUniformGrid::DirectCandidateSpan(
         return false;
     }
 
+    return DirectCandidateSpanForCertifiedQuery(query, result);
+}
+
+bool OptimizedCpuStaticUniformGrid::DirectCandidateSpanForCertifiedQuery(
+        const GmBoxAligned &query,
+        CandidateSpan *result) const noexcept {
     const double requiredHalfExtent = std::max({
         static_cast<double>(query.halfExtents.x) +
                 RoundingSlack(query.center.x, query.halfExtents.x),
@@ -288,16 +300,29 @@ bool OptimizedCpuStaticUniformGrid::DirectCandidateSpan(
         static_cast<double>(query.halfExtents.z) +
                 RoundingSlack(query.center.z, query.halfExtents.z),
     });
-    const LooseLevel *selected = nullptr;
-    for (const LooseLevel &level : looseLevels_) {
-        if (requiredHalfExtent <= level.cellSize * 0.5) {
-            selected = &level;
-            break;
-        }
+    std::uint64_t requiredHalfExtentBits;
+    std::memcpy(&requiredHalfExtentBits,
+                &requiredHalfExtent,
+                sizeof(requiredHalfExtentBits));
+    constexpr std::uint64_t DoubleMantissaMask =
+            (std::uint64_t{1u} << 52u) - 1u;
+    const int requiredFloorExponent =
+            static_cast<int>((requiredHalfExtentBits >> 52u) & 0x7ffu) -
+            1023;
+    const int requiredCeilingExponent =
+            requiredFloorExponent +
+            ((requiredHalfExtentBits & DoubleMantissaMask) != 0u);
+    int selectedLevelIndex =
+            requiredCeilingExponent - baseHalfCellExponent_;
+    if (selectedLevelIndex < 0) {
+        selectedLevelIndex = 0;
     }
-    if (selected == nullptr) {
+    if (static_cast<std::size_t>(selectedLevelIndex) >=
+        looseLevels_.size()) {
         return false;
     }
+    const LooseLevel *selected =
+            &looseLevels_[static_cast<std::size_t>(selectedLevelIndex)];
 
     auto queryCoordinate = [](float center,
                               double origin,
@@ -327,8 +352,12 @@ bool OptimizedCpuStaticUniformGrid::DirectCandidateSpan(
                                   selected->dimensionZ);
     const u32 cellIndex =
             (z * selected->dimensionY + y) * selected->dimensionX + x;
-    const u32 first = selected->offsets[cellIndex];
-    const u32 last = selected->offsets[cellIndex + 1u];
+    std::array<u32, 2u> range;
+    std::memcpy(range.data(),
+                selected->offsets.data() + cellIndex,
+                sizeof(range));
+    const u32 first = range[0u];
+    const u32 last = range[1u];
     result->size = last - first;
     result->data = result->size == 0u
             ? nullptr

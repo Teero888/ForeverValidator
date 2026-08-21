@@ -486,6 +486,12 @@ void CSceneVehicleCar::ApplyWaterSplashImpulse(const CSceneVehicleCarTuning &tun
 }
 
 int CSceneVehicleCar::ApplyWaterForces(const GmVec3 &forceToSubtract) {
+  const CHmsZone *zone = HmsItem()->GetZone(0ul);
+  const CSceneVehicleWaterZone *waterZone = zone->WaterZone();
+  if (waterZone == nullptr || !waterZone->IsEnabled()) {
+    return 0;
+  }
+
   CHmsCorpus *corpus = HmsItem()->CorpusAt(0u);
   const GmIso4 *iso = corpus->GetLocation();
 
@@ -496,10 +502,7 @@ int CSceneVehicleCar::ApplyWaterForces(const GmVec3 &forceToSubtract) {
   float lowerY = worldBox.center.y - halfY;
   float upperY = worldBox.center.y + halfY;
 
-  const CHmsZone *zone = HmsItem()->GetZone(0ul);
-  const CSceneVehicleWaterZone *waterZone = zone->WaterZone();
-  if (waterZone == nullptr ||
-      !waterZone->AcceptsRegion(sample, lowerY, upperY)) {
+  if (!waterZone->AcceptsRegion(sample, lowerY, upperY)) {
     return 0;
   }
 

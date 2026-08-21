@@ -21,6 +21,7 @@
 #include "simulation/backends/optimized_cpu/optimized_cpu_native_binary32_collision.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_ellipsoid_mesh_packet.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_bounds_overlap.h"
+#include "simulation/backends/optimized_cpu/optimized_cpu_vehicle_collision_bounds_plan.h"
 
 #if defined(__i386__) || defined(__x86_64__)
 #include <immintrin.h>
@@ -32,11 +33,14 @@ namespace {
 
 constexpr std::size_t EllipsoidPacketWidth = 8u;
 
+struct DeferredEllipsoidPacketLaneGeometry {};
+
 struct EllipsoidPacketTraversalLane {
     CPlugTree *tree = nullptr;
     CPlugSurface *surface = nullptr;
-    GmIso4 location{};
-    GmBoxAligned bounds{};
+    alignas(GmIso4) std::array<std::byte, sizeof(GmIso4)> locationStorage_;
+    alignas(GmBoxAligned)
+            std::array<std::byte, sizeof(GmBoxAligned)> boundsStorage_;
     LocatedGmSurf located{};
     SHmsSphereBufferContact *sphereContact = nullptr;
     CHmsCollisionBuffer *buffer = nullptr;
@@ -50,13 +54,58 @@ struct EllipsoidPacketTraversalLane {
             u32 temporalSlotOrdinalValue) noexcept
         : tree(treeValue),
           surface(surfaceValue),
-          location(locationValue),
-          bounds(boundsValue),
+          located{},
+          sphereContact(nullptr),
+          buffer(nullptr),
+          temporalSlotOrdinal(temporalSlotOrdinalValue) {
+        MaterializeGeometry(locationValue, boundsValue);
+    }
+
+    EllipsoidPacketTraversalLane(
+            CPlugTree *treeValue,
+            CPlugSurface *surfaceValue,
+            u32 temporalSlotOrdinalValue,
+            DeferredEllipsoidPacketLaneGeometry) noexcept
+        : tree(treeValue),
+          surface(surfaceValue),
           located{},
           sphereContact(nullptr),
           buffer(nullptr),
           temporalSlotOrdinal(temporalSlotOrdinalValue) {}
+
+    void MaterializeGeometry(
+            const GmIso4 &locationValue,
+            const GmBoxAligned &boundsValue) noexcept {
+        ::new (static_cast<void *>(locationStorage_.data()))
+                GmIso4(locationValue);
+        ::new (static_cast<void *>(boundsStorage_.data()))
+                GmBoxAligned(boundsValue);
+        located.iso = &Location();
+    }
+
+    GmIso4 &Location(void) noexcept {
+        return *std::launder(reinterpret_cast<GmIso4 *>(
+                locationStorage_.data()));
+    }
+
+    const GmIso4 &Location(void) const noexcept {
+        return *std::launder(reinterpret_cast<const GmIso4 *>(
+                locationStorage_.data()));
+    }
+
+    GmBoxAligned &Bounds(void) noexcept {
+        return *std::launder(reinterpret_cast<GmBoxAligned *>(
+                boundsStorage_.data()));
+    }
+
+    const GmBoxAligned &Bounds(void) const noexcept {
+        return *std::launder(reinterpret_cast<const GmBoxAligned *>(
+                boundsStorage_.data()));
+    }
 };
+
+static_assert(std::is_trivially_destructible_v<GmIso4>);
+static_assert(std::is_trivially_destructible_v<GmBoxAligned>);
 
 template <typename T, std::size_t Count>
 class UninitializedObjectArray {
@@ -97,6 +146,12 @@ using EllipsoidPacketTraversalLanes = UninitializedObjectArray<
         EllipsoidPacketWidth>;
 
 #if defined(__i386__) || defined(__x86_64__)
+struct DirectLaneVec3x8 {
+    __m256 x;
+    __m256 y;
+    __m256 z;
+};
+
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((target("avx2"), always_inline))
 #endif
@@ -141,6 +196,33 @@ inline __m256 DirectLaneAbsoluteDot3(
             xy,
             _mm256_mul_ps(
                     DirectLaneAbsoluteBroadcast(coefficientZ), z));
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("avx2"), always_inline))
+#endif
+inline DirectLaneVec3x8 DirectLaneComposeDirection(
+        __m256 x,
+        __m256 y,
+        __m256 z,
+        const GmMat3 &rotation) noexcept {
+    return {
+            DirectLaneDot3(
+                    x, y, z,
+                    rotation.basisX.x,
+                    rotation.basisY.x,
+                    rotation.basisZ.x),
+            DirectLaneDot3(
+                    x, y, z,
+                    rotation.basisX.y,
+                    rotation.basisY.y,
+                    rotation.basisZ.y),
+            DirectLaneDot3(
+                    x, y, z,
+                    rotation.basisX.z,
+                    rotation.basisY.z,
+                    rotation.basisZ.z),
+    };
 }
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -292,7 +374,309 @@ inline void PopulateCertifiedPacketLane(
     prepared.buffers[laneIndex] = buffer;
 }
 
+inline void PopulateCertifiedPacketLaneSurface(
+        OptimizedCpuPreparedEllipsoidMeshPacket &prepared,
+        std::size_t laneIndex,
+        const GmSurfEllipsoid &ellipsoid,
+        CHmsCollisionBuffer *buffer) noexcept {
+    const GmVec3 radii = ellipsoid.radii;
+    prepared.radiiX.values[laneIndex] = radii.x;
+    prepared.radiiY.values[laneIndex] = radii.y;
+    prepared.radiiZ.values[laneIndex] = radii.z;
+    prepared.inverseRadiiX.values[laneIndex] = 1.0f / radii.x;
+    prepared.inverseRadiiY.values[laneIndex] = 1.0f / radii.y;
+    prepared.inverseRadiiZ.values[laneIndex] = 1.0f / radii.z;
+    prepared.materials[laneIndex] = ellipsoid.material;
+    prepared.buffers[laneIndex] = buffer;
+}
+
 #if defined(__i386__) || defined(__x86_64__)
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((hot, noinline, target("avx2"),
+               optimize("no-inline-functions,no-unroll-loops")))
+#elif defined(__clang__)
+__attribute__((hot, noinline, target("avx2")))
+#endif
+std::size_t CollectDirectLaneStarTraversalLanesAllLocalAvx2(
+        const GmIso4 &rootLocation,
+        const OptimizedCpuMovingEllipsoidPacketPlan &movingPlan,
+        const forevervalidator::simulation::
+                OptimizedCpuVehicleCollisionBoundsPlan::DirectLaneSnapshot *
+                        directLaneSnapshot,
+        EllipsoidPacketTraversalLanes *lanes,
+        OptimizedCpuPreparedEllipsoidMeshPacket *preparedPacket,
+        forevervalidator::simulation::OptimizedCpuStaticBoundsPacket8
+                *packedLaneBounds) {
+    const auto *planLanes = movingPlan.LaneData();
+    alignas(32) float sourceCenterX[EllipsoidPacketWidth];
+    alignas(32) float sourceCenterY[EllipsoidPacketWidth];
+    alignas(32) float sourceCenterZ[EllipsoidPacketWidth];
+    alignas(32) float sourceHalfX[EllipsoidPacketWidth];
+    alignas(32) float sourceHalfY[EllipsoidPacketWidth];
+    alignas(32) float sourceHalfZ[EllipsoidPacketWidth];
+    alignas(32) float locationXx[EllipsoidPacketWidth];
+    alignas(32) float locationXy[EllipsoidPacketWidth];
+    alignas(32) float locationXz[EllipsoidPacketWidth];
+    alignas(32) float locationYx[EllipsoidPacketWidth];
+    alignas(32) float locationYy[EllipsoidPacketWidth];
+    alignas(32) float locationYz[EllipsoidPacketWidth];
+    alignas(32) float locationZx[EllipsoidPacketWidth];
+    alignas(32) float locationZy[EllipsoidPacketWidth];
+    alignas(32) float locationZz[EllipsoidPacketWidth];
+    alignas(32) float locationTx[EllipsoidPacketWidth];
+    alignas(32) float locationTy[EllipsoidPacketWidth];
+    alignas(32) float locationTz[EllipsoidPacketWidth];
+    const bool useSnapshot = directLaneSnapshot != nullptr;
+    if (!useSnapshot) {
+        for (std::size_t laneIndex = 0u;
+             laneIndex < EllipsoidPacketWidth;
+             ++laneIndex) {
+            const CPlugTree &tree = *planLanes[laneIndex].tree;
+            const GmBoxAligned &source = tree.Box();
+            sourceCenterX[laneIndex] = source.center.x;
+            sourceCenterY[laneIndex] = source.center.y;
+            sourceCenterZ[laneIndex] = source.center.z;
+            sourceHalfX[laneIndex] = source.halfExtents.x;
+            sourceHalfY[laneIndex] = source.halfExtents.y;
+            sourceHalfZ[laneIndex] = source.halfExtents.z;
+
+            const GmIso4 &location = tree.LocalIso();
+            locationXx[laneIndex] = location.rotation.basisX.x;
+            locationXy[laneIndex] = location.rotation.basisX.y;
+            locationXz[laneIndex] = location.rotation.basisX.z;
+            locationYx[laneIndex] = location.rotation.basisY.x;
+            locationYy[laneIndex] = location.rotation.basisY.y;
+            locationYz[laneIndex] = location.rotation.basisY.z;
+            locationZx[laneIndex] = location.rotation.basisZ.x;
+            locationZy[laneIndex] = location.rotation.basisZ.y;
+            locationZz[laneIndex] = location.rotation.basisZ.z;
+            locationTx[laneIndex] = location.translation.x;
+            locationTy[laneIndex] = location.translation.y;
+            locationTz[laneIndex] = location.translation.z;
+        }
+    }
+
+    const __m256 centerX = _mm256_load_ps(useSnapshot
+            ? directLaneSnapshot->centerX.data()
+            : sourceCenterX);
+    const __m256 centerY = _mm256_load_ps(useSnapshot
+            ? directLaneSnapshot->centerY.data()
+            : sourceCenterY);
+    const __m256 centerZ = _mm256_load_ps(useSnapshot
+            ? directLaneSnapshot->centerZ.data()
+            : sourceCenterZ);
+    const __m256 halfX = _mm256_load_ps(useSnapshot
+            ? directLaneSnapshot->halfX.data()
+            : sourceHalfX);
+    const __m256 halfY = _mm256_load_ps(useSnapshot
+            ? directLaneSnapshot->halfY.data()
+            : sourceHalfY);
+    const __m256 halfZ = _mm256_load_ps(useSnapshot
+            ? directLaneSnapshot->halfZ.data()
+            : sourceHalfZ);
+    if (!DirectLaneBoxValuesAreBounded(
+                centerX,
+                centerY,
+                centerZ,
+                halfX,
+                halfY,
+                halfZ)) {
+        return 0u;
+    }
+    const GmMat3 &rotation = rootLocation.rotation;
+
+    _mm256_storeu_ps(
+            packedLaneBounds->centerX,
+            _mm256_add_ps(
+                    DirectLaneDot3(
+                            centerX, centerY, centerZ,
+                            rotation.basisX.x,
+                            rotation.basisY.x,
+                            rotation.basisZ.x),
+                    _mm256_set1_ps(rootLocation.translation.x)));
+    _mm256_storeu_ps(
+            packedLaneBounds->centerY,
+            _mm256_add_ps(
+                    DirectLaneDot3(
+                            centerX, centerY, centerZ,
+                            rotation.basisX.y,
+                            rotation.basisY.y,
+                            rotation.basisZ.y),
+                    _mm256_set1_ps(rootLocation.translation.y)));
+    _mm256_storeu_ps(
+            packedLaneBounds->centerZ,
+            _mm256_add_ps(
+                    DirectLaneDot3(
+                            centerX, centerY, centerZ,
+                            rotation.basisX.z,
+                            rotation.basisY.z,
+                            rotation.basisZ.z),
+                    _mm256_set1_ps(rootLocation.translation.z)));
+    _mm256_storeu_ps(
+            packedLaneBounds->extentX,
+            DirectLaneAbsoluteDot3(
+                    halfX, halfY, halfZ,
+                    rotation.basisX.x,
+                    rotation.basisY.x,
+                    rotation.basisZ.x));
+    _mm256_storeu_ps(
+            packedLaneBounds->extentY,
+            DirectLaneAbsoluteDot3(
+                    halfX, halfY, halfZ,
+                    rotation.basisX.y,
+                    rotation.basisY.y,
+                    rotation.basisZ.y));
+    _mm256_storeu_ps(
+            packedLaneBounds->extentZ,
+            DirectLaneAbsoluteDot3(
+                    halfX, halfY, halfZ,
+                    rotation.basisX.z,
+                    rotation.basisY.z,
+                    rotation.basisZ.z));
+
+    const DirectLaneVec3x8 composedLocationX =
+            DirectLaneComposeDirection(
+                    _mm256_load_ps(useSnapshot
+                            ? directLaneSnapshot->locationXx.data()
+                            : locationXx),
+                    _mm256_load_ps(useSnapshot
+                            ? directLaneSnapshot->locationXy.data()
+                            : locationXy),
+                    _mm256_load_ps(useSnapshot
+                            ? directLaneSnapshot->locationXz.data()
+                            : locationXz),
+                    rotation);
+    _mm256_store_ps(
+            preparedPacket->worldXx.values.data(), composedLocationX.x);
+    _mm256_store_ps(
+            preparedPacket->worldYx.values.data(), composedLocationX.y);
+    _mm256_store_ps(
+            preparedPacket->worldZx.values.data(), composedLocationX.z);
+    const DirectLaneVec3x8 composedLocationY =
+            DirectLaneComposeDirection(
+                    _mm256_load_ps(useSnapshot
+                            ? directLaneSnapshot->locationYx.data()
+                            : locationYx),
+                    _mm256_load_ps(useSnapshot
+                            ? directLaneSnapshot->locationYy.data()
+                            : locationYy),
+                    _mm256_load_ps(useSnapshot
+                            ? directLaneSnapshot->locationYz.data()
+                            : locationYz),
+                    rotation);
+    _mm256_store_ps(
+            preparedPacket->worldXy.values.data(), composedLocationY.x);
+    _mm256_store_ps(
+            preparedPacket->worldYy.values.data(), composedLocationY.y);
+    _mm256_store_ps(
+            preparedPacket->worldZy.values.data(), composedLocationY.z);
+    const DirectLaneVec3x8 composedLocationZ =
+            DirectLaneComposeDirection(
+                    _mm256_load_ps(useSnapshot
+                            ? directLaneSnapshot->locationZx.data()
+                            : locationZx),
+                    _mm256_load_ps(useSnapshot
+                            ? directLaneSnapshot->locationZy.data()
+                            : locationZy),
+                    _mm256_load_ps(useSnapshot
+                            ? directLaneSnapshot->locationZz.data()
+                            : locationZz),
+                    rotation);
+    _mm256_store_ps(
+            preparedPacket->worldXz.values.data(), composedLocationZ.x);
+    _mm256_store_ps(
+            preparedPacket->worldYz.values.data(), composedLocationZ.y);
+    _mm256_store_ps(
+            preparedPacket->worldZz.values.data(), composedLocationZ.z);
+
+    const __m256 translationX = _mm256_load_ps(useSnapshot
+            ? directLaneSnapshot->locationTx.data()
+            : locationTx);
+    const __m256 translationY = _mm256_load_ps(useSnapshot
+            ? directLaneSnapshot->locationTy.data()
+            : locationTy);
+    const __m256 translationZ = _mm256_load_ps(useSnapshot
+            ? directLaneSnapshot->locationTz.data()
+            : locationTz);
+    _mm256_store_ps(
+            preparedPacket->worldTx.values.data(),
+            _mm256_add_ps(
+                    DirectLaneDot3(
+                            translationX, translationY, translationZ,
+                            rotation.basisX.x,
+                            rotation.basisY.x,
+                            rotation.basisZ.x),
+                    _mm256_set1_ps(rootLocation.translation.x)));
+    _mm256_store_ps(
+            preparedPacket->worldTy.values.data(),
+            _mm256_add_ps(
+                    DirectLaneDot3(
+                            translationX, translationY, translationZ,
+                            rotation.basisX.y,
+                            rotation.basisY.y,
+                            rotation.basisZ.y),
+                    _mm256_set1_ps(rootLocation.translation.y)));
+    _mm256_store_ps(
+            preparedPacket->worldTz.values.data(),
+            _mm256_add_ps(
+                    DirectLaneDot3(
+                            translationX, translationY, translationZ,
+                            rotation.basisX.z,
+                            rotation.basisY.z,
+                            rotation.basisZ.z),
+                    _mm256_set1_ps(rootLocation.translation.z)));
+
+    for (std::size_t laneIndex = 0u;
+         laneIndex < EllipsoidPacketWidth;
+         ++laneIndex) {
+        const OptimizedCpuMovingEllipsoidPacketPlan::Lane &planLane =
+                planLanes[laneIndex];
+        lanes->ConstructAt(
+                laneIndex,
+                planLane.tree,
+                planLane.surface,
+                planLane.temporalSlotOrdinal,
+                DeferredEllipsoidPacketLaneGeometry{});
+    }
+    return EllipsoidPacketWidth;
+}
+
+void MaterializeDirectLaneGeometry(
+        EllipsoidPacketTraversalLanes &lanes,
+        const OptimizedCpuPreparedEllipsoidMeshPacket &preparedPacket,
+        const forevervalidator::simulation::OptimizedCpuStaticBoundsPacket8
+                &packedLaneBounds) noexcept {
+    for (std::size_t laneIndex = 0u;
+         laneIndex < EllipsoidPacketWidth;
+         ++laneIndex) {
+        const GmIso4 location = {
+            {
+                {preparedPacket.worldXx.values[laneIndex],
+                 preparedPacket.worldYx.values[laneIndex],
+                 preparedPacket.worldZx.values[laneIndex]},
+                {preparedPacket.worldXy.values[laneIndex],
+                 preparedPacket.worldYy.values[laneIndex],
+                 preparedPacket.worldZy.values[laneIndex]},
+                {preparedPacket.worldXz.values[laneIndex],
+                 preparedPacket.worldYz.values[laneIndex],
+                 preparedPacket.worldZz.values[laneIndex]},
+            },
+            {preparedPacket.worldTx.values[laneIndex],
+             preparedPacket.worldTy.values[laneIndex],
+             preparedPacket.worldTz.values[laneIndex]},
+        };
+        const GmBoxAligned bounds = {
+            {packedLaneBounds.centerX[laneIndex],
+             packedLaneBounds.centerY[laneIndex],
+             packedLaneBounds.centerZ[laneIndex]},
+            {packedLaneBounds.extentX[laneIndex],
+             packedLaneBounds.extentY[laneIndex],
+             packedLaneBounds.extentZ[laneIndex]},
+        };
+        lanes[laneIndex].MaterializeGeometry(location, bounds);
+    }
+}
+
 #if defined(__GNUC__) && !defined(__clang__)
 __attribute__((hot, noinline, target("avx2"),
                optimize("no-inline-functions,no-unroll-loops")))
@@ -302,7 +686,22 @@ __attribute__((hot, noinline, target("avx2")))
 std::size_t CollectDirectLaneStarTraversalLanesAvx2(
         const GmIso4 &rootLocation,
         const OptimizedCpuMovingEllipsoidPacketPlan &movingPlan,
-        EllipsoidPacketTraversalLanes *lanes) {
+        const forevervalidator::simulation::
+                OptimizedCpuVehicleCollisionBoundsPlan::DirectLaneSnapshot *
+                        directLaneSnapshot,
+        EllipsoidPacketTraversalLanes *lanes,
+        OptimizedCpuPreparedEllipsoidMeshPacket *preparedPacket,
+        forevervalidator::simulation::OptimizedCpuStaticBoundsPacket8
+                *packedLaneBounds) {
+    if (movingPlan.DirectLanesUseLocalTransforms()) {
+        return CollectDirectLaneStarTraversalLanesAllLocalAvx2(
+                rootLocation,
+                movingPlan,
+                directLaneSnapshot,
+                lanes,
+                preparedPacket,
+                packedLaneBounds);
+    }
     const auto *planNodes = movingPlan.NodeData();
     const auto *planLanes = movingPlan.LaneData();
     alignas(32) float sourceCenterX[EllipsoidPacketWidth];
@@ -422,7 +821,13 @@ std::size_t CollectDirectLaneStarTraversalLanes(
         const GmIso4 &movingIso,
         const OptimizedCpuMovingEllipsoidPacketPlan &movingPlan,
         bool boundsArithmeticIsBounded,
-        EllipsoidPacketTraversalLanes *lanes) {
+        const forevervalidator::simulation::
+                OptimizedCpuVehicleCollisionBoundsPlan::DirectLaneSnapshot *
+                        directLaneSnapshot,
+        EllipsoidPacketTraversalLanes *lanes,
+        OptimizedCpuPreparedEllipsoidMeshPacket *preparedPacket,
+        forevervalidator::simulation::OptimizedCpuStaticBoundsPacket8
+                *packedLaneBounds) {
     const auto *planNodes = movingPlan.NodeData();
     const auto *planLanes = movingPlan.LaneData();
     const OptimizedCpuMovingEllipsoidPacketPlan::Node &rootNode =
@@ -439,7 +844,12 @@ std::size_t CollectDirectLaneStarTraversalLanes(
     if (boundsArithmeticIsBounded &&
         laneCount == EllipsoidPacketWidth) {
         return CollectDirectLaneStarTraversalLanesAvx2(
-                rootLocation, movingPlan, lanes);
+                rootLocation,
+                movingPlan,
+                directLaneSnapshot,
+                lanes,
+                preparedPacket,
+                packedLaneBounds);
     }
 #else
     (void)boundsArithmeticIsBounded;
@@ -541,6 +951,8 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
         const GmIso4 &movingIso,
         const CPlugTree &movingTree,
         const OptimizedCpuMovingEllipsoidPacketPlan *movingPlan,
+        const forevervalidator::simulation::
+                OptimizedCpuVehicleCollisionBoundsPlan *collisionBoundsPlan,
         const OptimizedCpuStaticSurfaceTransformGroup &transforms,
         GmOctree<CHmsCollisionManagerSColOctreeCell> &staticTrees) {
     if (!OptimizedCpuEllipsoidMeshPacketAvailable()) {
@@ -552,6 +964,9 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
     // fixed-capacity arrays on every packet pass while keeping normal C++
     // object lifetimes for the active entries.
     EllipsoidPacketTraversalLanes lanes;
+    OptimizedCpuPreparedEllipsoidMeshPacket preparedPacket;
+    forevervalidator::simulation::OptimizedCpuStaticBoundsPacket8
+            packedLaneBounds;
     std::size_t laneCount = 0u;
     const bool directLaneStar =
             movingPlan != nullptr && movingPlan->IsDirectLaneStar();
@@ -570,12 +985,21 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
         return false;
     }
     if (movingPlan != nullptr) {
+        const forevervalidator::simulation::
+                OptimizedCpuVehicleCollisionBoundsPlan::DirectLaneSnapshot *
+                        directLaneSnapshot =
+                collisionBoundsPlan == nullptr
+                ? nullptr
+                : collisionBoundsPlan->DirectLaneSnapshotFor(&movingTree);
         laneCount = directLaneStar
                 ? CollectDirectLaneStarTraversalLanes(
                           movingIso,
                           *movingPlan,
                           directLaneBoundsArithmeticIsBounded,
-                          &lanes)
+                          directLaneSnapshot,
+                          &lanes,
+                          &preparedPacket,
+                          &packedLaneBounds)
                 : CollectCompiledPlanTraversalLanes(
                           movingIso, *movingPlan, &lanes);
     } else {
@@ -596,6 +1020,13 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
 
     const bool certifiedFullPacket =
             directLaneStar && laneCount == EllipsoidPacketWidth;
+#if defined(__i386__) || defined(__x86_64__)
+    const bool directPacketVectorsReady = certifiedFullPacket &&
+            movingPlan->DirectLanesUseLocalTransforms();
+#else
+    const bool directPacketVectorsReady = false;
+#endif
+    bool directLaneGeometryReady = !directPacketVectorsReady;
     const u32 *sharedCandidateCurrent = nullptr;
     std::size_t sharedCandidateRemaining = 0u;
     std::array<const u32 *, EllipsoidPacketWidth> candidateCurrent;
@@ -625,7 +1056,7 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
             if (!transforms.TemporalCandidateSpanFor(
                         *lanes[laneIndex].tree,
                         lanes[laneIndex].temporalSlotOrdinal,
-                        lanes[laneIndex].bounds,
+                        lanes[laneIndex].Bounds(),
                         &span)) {
                 return false;
             }
@@ -636,9 +1067,6 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
 
     std::array<OptimizedCpuEllipsoidMeshPacketLane, EllipsoidPacketWidth>
             packetLanes;
-    OptimizedCpuPreparedEllipsoidMeshPacket preparedPacket;
-    forevervalidator::simulation::OptimizedCpuStaticBoundsPacket8
-            packedLaneBounds;
     for (std::size_t laneIndex = 0u;
          laneIndex < laneCount;
          ++laneIndex) {
@@ -654,18 +1082,28 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
         }
         lane.located = {
             lane.surface->Geometry(),
-            &lane.location,
+            directPacketVectorsReady ? nullptr : &lane.Location(),
             1,
         };
         if (certifiedFullPacket) {
-            packedLaneBounds.SetLane(laneIndex, lane.bounds);
-            PopulateCertifiedPacketLane(
-                    preparedPacket,
-                    laneIndex,
-                    lane.location,
+            const GmSurfEllipsoid &ellipsoid =
                     static_cast<const GmSurfEllipsoid &>(
-                            *lane.located.surf),
-                    lane.buffer);
+                            *lane.located.surf);
+            if (directPacketVectorsReady) {
+                PopulateCertifiedPacketLaneSurface(
+                        preparedPacket,
+                        laneIndex,
+                        ellipsoid,
+                        lane.buffer);
+            } else {
+                packedLaneBounds.SetLane(laneIndex, lane.Bounds());
+                PopulateCertifiedPacketLane(
+                        preparedPacket,
+                        laneIndex,
+                        lane.Location(),
+                        ellipsoid,
+                        lane.buffer);
+            }
         } else {
             packetLanes[laneIndex] = {&lane.located, lane.buffer};
         }
@@ -697,6 +1135,11 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
 #else
     const bool usePacketBoundsOverlap = false;
 #endif
+    if (!usePacketBoundsOverlap && !directLaneGeometryReady) {
+        MaterializeDirectLaneGeometry(
+                lanes, preparedPacket, packedLaneBounds);
+        directLaneGeometryReady = true;
+    }
 
     for (;;) {
         u32 staticTreeIndex;
@@ -733,7 +1176,7 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
                  laneIndex < laneCount;
                  ++laneIndex) {
                 if (OptimizedCpuStaticBoundsOverlap(
-                            lanes[laneIndex].bounds,
+                            lanes[laneIndex].Bounds(),
                             record->Bounds())) {
                     activeMask |= 1u << laneIndex;
                 }
@@ -750,7 +1193,7 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
                 ++candidate;
                 --remaining;
                 if (OptimizedCpuStaticBoundsOverlap(
-                            lanes[laneIndex].bounds,
+                            lanes[laneIndex].Bounds(),
                             record->Bounds())) {
                     activeMask |= 1u << laneIndex;
                 }
@@ -809,6 +1252,11 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
         }
 
         if (!packetHandled) {
+            if (!directLaneGeometryReady) {
+                MaterializeDirectLaneGeometry(
+                        lanes, preparedPacket, packedLaneBounds);
+                directLaneGeometryReady = true;
+            }
             for (std::size_t laneIndex = 0u;
                  laneIndex < laneCount;
                  ++laneIndex) {
@@ -820,7 +1268,7 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
                         lane.buffer->PhysicalCollisionCount();
                 const SPlugSurfaceLocatedPair surfacePair = {
                     *lane.surface,
-                    lane.location,
+                    lane.Location(),
                     *staticSurface.surface,
                     staticSurface.location,
                 };
@@ -1019,18 +1467,28 @@ bool OptimizedCpuCollectDirectLaneStarBoundsForDifferential(
         return false;
     }
     EllipsoidPacketTraversalLanes lanes;
+    OptimizedCpuPreparedEllipsoidMeshPacket preparedPacket;
+    forevervalidator::simulation::OptimizedCpuStaticBoundsPacket8
+            packedLaneBounds;
     if (CollectDirectLaneStarTraversalLanes(
                 movingIso,
                 movingPlan,
                 boundsArithmeticIsBounded,
-                &lanes) !=
+                nullptr,
+                &lanes,
+                &preparedPacket,
+                &packedLaneBounds) !=
         OptimizedCpuMovingEllipsoidPacketPlan::MaxLaneCount) {
         return false;
+    }
+    if (movingPlan.DirectLanesUseLocalTransforms()) {
+        MaterializeDirectLaneGeometry(
+                lanes, preparedPacket, packedLaneBounds);
     }
     for (std::size_t laneIndex = 0u;
          laneIndex < OptimizedCpuMovingEllipsoidPacketPlan::MaxLaneCount;
          ++laneIndex) {
-        (*bounds)[laneIndex] = lanes[laneIndex].bounds;
+        (*bounds)[laneIndex] = lanes[laneIndex].Bounds();
     }
     return true;
 }
@@ -1189,7 +1647,10 @@ void CHmsCollisionManager::SZone::
 DetectCollisionsCorpusOptimizedCpuNativeBinary32Cached(
         CHmsCollisionBuffer &collisionBuffer,
         CHmsCorpus *corpus,
-        const OptimizedCpuStaticSurfaceTransformCache &transforms) {
+        const OptimizedCpuStaticSurfaceTransformCache &transforms,
+        const forevervalidator::simulation::
+                OptimizedCpuVehicleCollisionBoundsPlan *
+                        collisionBoundsPlan) {
     activeCollisionBuffer = &collisionBuffer;
 
     const u32 groupIndex = corpus->Item()->CollisionGroup();
@@ -1237,6 +1698,7 @@ DetectCollisionsCorpusOptimizedCpuNativeBinary32Cached(
                             *corpus->CollisionTree(),
                             transforms.MovingEllipsoidPacketPlanFor(
                                     *corpus->CollisionTree()),
+                            collisionBoundsPlan,
                             *groupTransforms,
                             against->targetGroup->staticTrees)) {
                     u32 nextTemporalSlotOrdinal = 0u;

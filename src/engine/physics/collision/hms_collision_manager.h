@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -18,6 +19,9 @@ struct CPlugSurface;
 struct CPlugTree;
 class OptimizedCpuStaticSurfaceTransformCache;
 class OptimizedCpuStaticSurfaceTransformGroup;
+namespace forevervalidator::simulation {
+class OptimizedCpuVehicleCollisionBoundsPlan;
+}
 
 struct CHmsCollisionManager {
     struct SZone;
@@ -157,7 +161,26 @@ struct CHmsCollisionManager {
                 const GmBoxAligned &boxB);
         int ComputeCollision(
                 const SPlugTreeLocatedPair &pair);
-        SHmsSphereBufferContact *EnsureTreeSphereContact(CPlugTree *tree);
+        SHmsSphereBufferContact *EnsureTreeSphereContactSlow(
+                CPlugTree *tree,
+                TreeSphereContactCacheEntry &cached);
+#if defined(__GNUC__) || defined(__clang__)
+        __attribute__((always_inline))
+#endif
+        inline SHmsSphereBufferContact *EnsureTreeSphereContact(
+                CPlugTree *tree) {
+            static_assert((TreeSphereContactCacheSize &
+                           (TreeSphereContactCacheSize - 1u)) == 0u);
+            const std::size_t cacheIndex =
+                    (reinterpret_cast<std::uintptr_t>(tree) >> 4u) &
+                    (TreeSphereContactCacheSize - 1u);
+            TreeSphereContactCacheEntry &cached =
+                    sphereContactCache[cacheIndex];
+            if (tree != nullptr && cached.tree == tree) {
+                return cached.contact;
+            }
+            return EnsureTreeSphereContactSlow(tree, cached);
+        }
         void AddSphereContactOnce(SHmsSphereBufferContact *sphereContact);
         void MergeQueuedSphereContacts(CHmsCollisionBuffer &collisionBuffer);
         void BeginReplayStaticCollisionPass(
@@ -218,7 +241,10 @@ struct CHmsCollisionManager {
         void DetectCollisionsCorpusOptimizedCpuNativeBinary32Cached(
                 CHmsCollisionBuffer &collisionBuffer,
                 CHmsCorpus *corpus,
-                const OptimizedCpuStaticSurfaceTransformCache &transforms);
+                const OptimizedCpuStaticSurfaceTransformCache &transforms,
+                const forevervalidator::simulation::
+                        OptimizedCpuVehicleCollisionBoundsPlan *
+                                collisionBoundsPlan = nullptr);
 
     private:
         friend struct CHmsZoneDynamic;

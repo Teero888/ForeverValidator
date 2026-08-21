@@ -1,6 +1,7 @@
 // Wheel suspension, contact absorption, and impulse application.
 
 #include "engine/scene/scene_vehicle_car_internal.h"
+#include <cstring>
 using namespace SceneVehicleCarDynamics;
 
 void CSceneVehicleCar::OtherVehicleForces() {}
@@ -635,9 +636,62 @@ void CSceneVehicleCar::AbsorbContact(CHmsPhysicalContact &contact) {
   }
 }
 
+static bool FakeContactPowerOfTwoWrappedMagnitude(float coordinate,
+                                                  float period,
+                                                  float *result) {
+  u32 coordinateBits;
+  u32 periodBits;
+  std::memcpy(&coordinateBits, &coordinate, sizeof(coordinateBits));
+  std::memcpy(&periodBits, &period, sizeof(periodBits));
+  const u32 coordinateMagnitudeBits = coordinateBits & 0x7fffffffu;
+  const u32 coordinateExponent = coordinateMagnitudeBits >> 23u;
+  const u32 periodExponent = periodBits >> 23u;
+  if (result == nullptr || (periodBits & 0x807fffffu) != 0u ||
+      periodExponent == 0u || periodExponent == 0xffu ||
+      coordinateExponent == 0xffu) {
+    return false;
+  }
+
+  float magnitude;
+  std::memcpy(&magnitude,
+              &coordinateMagnitudeBits,
+              sizeof(magnitude));
+  if (coordinateMagnitudeBits < periodBits) {
+    *result = magnitude;
+    return true;
+  }
+
+  // Dividing by an exact power of two only changes the exponent. Decline the
+  // fast path before that exponent could overflow; the generic fmod retains
+  // all exceptional-input behavior.
+  if (periodExponent < 127u &&
+      coordinateExponent > periodExponent + 127u) {
+    return false;
+  }
+  const float quotient = magnitude / period;
+  u32 integralQuotientBits;
+  std::memcpy(&integralQuotientBits,
+              &quotient,
+              sizeof(integralQuotientBits));
+  const u32 quotientExponent = integralQuotientBits >> 23u;
+  if (quotientExponent < 150u) {
+    const u32 fractionalBitCount = 150u - quotientExponent;
+    integralQuotientBits &= ~((1u << fractionalBitCount) - 1u);
+  }
+  float integralQuotient;
+  std::memcpy(&integralQuotient,
+              &integralQuotientBits,
+              sizeof(integralQuotient));
+  *result = magnitude - integralQuotient * period;
+  return true;
+}
+
 static u32 FakeContactTextureIndex(float coordinate, float period, int dim) {
-  float wrapped = CIfmod(coordinate, period);
-  float absWrapped = std::fabs(wrapped);
+  float absWrapped;
+  if (!FakeContactPowerOfTwoWrappedMagnitude(
+          coordinate, period, &absWrapped)) {
+    absWrapped = std::fabs(CIfmod(coordinate, period));
+  }
   return static_cast<u32>((absWrapped / period) *
                           Binary32::FromUnsignedInteger(static_cast<u32>(dim)));
 }
@@ -650,8 +704,15 @@ static float FakeContactSpeedFromPixel(uint8_t pixel, float forwardSpeed,
 }
 
 void CSceneVehicleCar::CreateFakeContacts() {
+  CHmsItem *item = HmsItem();
   GmVec3 linearSpeed;
-  HmsItem()->GetLinearSpeed(linearSpeed);
+  item->GetLinearSpeed(linearSpeed);
+
+  CHmsCorpus *corpus = nullptr;
+  const GmIso4 *iso = nullptr;
+  u32 cachedContactMaterial = ~u32{0};
+  CSceneVehicleMaterial *material = nullptr;
+  CPlugFileImg *image = nullptr;
 
   u32 wheelCount = WheelGetCount();
   for (u32 wheelIndex = 0; wheelIndex < wheelCount; wheelIndex++) {
@@ -660,23 +721,27 @@ void CSceneVehicleCar::CreateFakeContacts() {
       continue;
     }
 
-    u32 remappedMaterialIndex =
-        MaterialRemapAt(wheel->realTimeState.contactMaterial);
-    CSceneVehicleMaterial *material =
-        MaterialContainer()->MaterialAt(remappedMaterialIndex);
-    CPlugBitmap *bitmap = material->fakeContactBitmap;
-    if (bitmap == nullptr) {
-      return;
+    const u32 contactMaterial = wheel->realTimeState.contactMaterial;
+    if (contactMaterial != cachedContactMaterial) {
+      u32 remappedMaterialIndex = MaterialRemapAt(contactMaterial);
+      material = MaterialContainer()->MaterialAt(remappedMaterialIndex);
+      CPlugBitmap *bitmap = material->fakeContactBitmap;
+      if (bitmap == nullptr) {
+        return;
+      }
+
+      image = bitmap->Image();
+      if (image->IsInSystemMemory() == 0 && bitmap->ReGenerate() == 0) {
+        return;
+      }
+      image = bitmap->Image();
+      cachedContactMaterial = contactMaterial;
     }
 
-    CPlugFileImg *image = bitmap->Image();
-    if (image->IsInSystemMemory() == 0 && bitmap->ReGenerate() == 0) {
-      return;
+    if (iso == nullptr) {
+      corpus = item->CorpusAt(0u);
+      iso = corpus->GetLocation();
     }
-    image = bitmap->Image();
-
-    CHmsCorpus *corpus = HmsItem()->CorpusAt(0u);
-    const GmIso4 *iso = corpus->GetLocation();
     GmVec3 worldSamplePoint;
     worldSamplePoint.SetMult(wheel->surfaceHandler.RestPoint(), *iso);
 

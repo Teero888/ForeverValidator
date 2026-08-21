@@ -62,6 +62,48 @@ static int pack_strings_equal(const char *lhs, const char *rhs) {
     }
 }
 
+static int pack_file_path_matches_reverse(
+        const CPlugFilePack &pack,
+        const CPlugFileFidContainer_SFileDesc &file,
+        const char *selectedPath,
+        size_t selectedPathLength) {
+    size_t remaining = selectedPathLength;
+    const char *fileName = file.name.c_str();
+    const size_t fileNameLength = pack_cstring_length(fileName);
+    if (fileNameLength > remaining) {
+        return 0;
+    }
+    remaining -= fileNameLength;
+    if (std::memcmp(selectedPath + remaining,
+                    fileName,
+                    fileNameLength) != 0) {
+        return 0;
+    }
+
+    u32 folderIndex = file.folderIndex;
+    size_t visitedFolderCount = 0u;
+    while (folderIndex != 0xffffffffu) {
+        if (static_cast<size_t>(folderIndex) >= pack.folders.size() ||
+            visitedFolderCount++ >= pack.folders.size()) {
+            return 0;
+        }
+        const CPlugFilePackFolderDesc &folder = pack.folders[folderIndex];
+        const char *folderName = folder.name.c_str();
+        const size_t folderNameLength = pack_cstring_length(folderName);
+        if (folderNameLength > remaining) {
+            return 0;
+        }
+        remaining -= folderNameLength;
+        if (std::memcmp(selectedPath + remaining,
+                        folderName,
+                        folderNameLength) != 0) {
+            return 0;
+        }
+        folderIndex = folder.parent;
+    }
+    return remaining == 0u;
+}
+
 static void copy_pack_bytes(unsigned char *dst,
                             const unsigned char *src,
                             size_t count) {
@@ -499,8 +541,15 @@ const CPlugFileFidContainer_SFileDesc *CPlugFilePack::FindFileDescByPath(
     if (selectedPath == nullptr || selectedPath[0] == '\0') {
         return nullptr;
     }
+    const size_t selectedPathLength = pack_cstring_length(selectedPath);
+    // FileDescPathMatches builds into a 512-byte local buffer, so a path that
+    // does not fit can never match there either.
+    if (selectedPathLength >= 512u) {
+        return nullptr;
+    }
     for (const CPlugFileFidContainer_SFileDesc &file : files) {
-        if (FileDescPathMatches(&file, selectedPath)) {
+        if (pack_file_path_matches_reverse(
+                    *this, file, selectedPath, selectedPathLength)) {
             return &file;
         }
     }

@@ -27,9 +27,21 @@ public:
     bool DirectCandidateSpan(const GmBoxAligned &query,
                              CandidateSpan *result) const noexcept;
 
+    // The caller has already certified a finite query with nonnegative
+    // extents, an available grid, and a non-null result. This is the
+    // packet-collision hot path; the ordinary entry point above remains
+    // defensive for general callers.
+    bool DirectCandidateSpanForCertifiedQuery(
+            const GmBoxAligned &query,
+            CandidateSpan *result) const noexcept;
+
+    bool IsAvailable(void) const noexcept {
+        return !looseLevels_.empty();
+    }
+
 private:
     struct LooseLevel {
-        double cellSize = 0.0;
+        double halfCellSize = 0.0;
         double inverseCellSize = 0.0;
         u32 dimensionX = 0u;
         u32 dimensionY = 0u;
@@ -41,5 +53,6 @@ private:
     double originX_ = 0.0;
     double originY_ = 0.0;
     double originZ_ = 0.0;
+    int baseHalfCellExponent_ = 0;
     std::vector<LooseLevel> looseLevels_;
 };

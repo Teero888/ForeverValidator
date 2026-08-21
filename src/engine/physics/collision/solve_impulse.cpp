@@ -191,10 +191,13 @@ void CHmsCorpus::ApplyImpulseForSolveImpulse(
         (negAdjustedSpeed.y * invSpeed),
         (invSpeed * negAdjustedSpeed.z),
     };
-    float denominator = targetDyna->InverseMass();
-    if (targetDyna != 0 && targetDyna->UsesFullAngularDynamics() && !UsesLinearImpulseOnlyForSolveImpulse()) {
+    const int usesLinearImpulseOnly = UsesLinearImpulseOnlyForSolveImpulse();
+    float denominator;
+    if (targetDyna->UsesFullAngularDynamics() && !usesLinearImpulseOnly) {
         denominator = targetDyna->AngularEffectiveMassTermForSolveImpulse(
                 collision, impulseDir, sideB);
+    } else {
+        denominator = targetDyna->InverseMass();
     }
 
     float restitutionScale = (speed * (restitution + 1.0f));
@@ -205,7 +208,7 @@ void CHmsCorpus::ApplyImpulseForSolveImpulse(
         (impulseMagnitude * impulseDir.z),
     };
 
-    if (UsesLinearImpulseOnlyForSolveImpulse()) {
+    if (usesLinearImpulseOnly) {
         targetDyna->AddImpulse(impulse);
     } else {
         targetDyna->AddImpulse(impulse, collision->contactPoint);

@@ -682,7 +682,7 @@ private:
       const GmVec3 &linearSpeed, u32 tick, int waterActive, float slipAccelMix);
 
 public:
-  unsigned long WheelGetCount(void) const override;
+  unsigned long WheelGetCount(void) const override final;
   int WheelIsSliding(unsigned long wheelIndex) const override;
   unsigned short
   WheelGetContactMaterial(unsigned long wheelIndex) const override;

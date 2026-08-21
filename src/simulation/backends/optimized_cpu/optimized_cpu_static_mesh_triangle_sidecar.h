@@ -21,31 +21,37 @@ struct OptimizedCpuStaticMeshTriangleData {
     GmLocalMaterialIndex material;
 };
 
+// Packet collision needs only these fields. Keeping them dense avoids walking
+// the 136-byte scalar-query record and fetching its material from the far end.
+struct OptimizedCpuStaticMeshPacketTriangleData {
+    std::array<GmVec3, 3> vertices{};
+    GmLocalMaterialIndex material;
+};
+
 struct OptimizedCpuStaticMeshDirectTrianglePosting {
     GmBoxAligned bounds{};
     u32 triangleIndex = 0u;
 };
 
 // Compiled only after the source hierarchy has passed topology validation.
-// Keep every field consumed by the packet traversal in one 36-byte stream;
-// the source cell's optional payload and the separate depth stream are not
-// needed in the hot loop.
+// Keep every field consumed by the packet traversal in one 36-byte stream,
+// with control metadata first so reject paths fetch it before cell bounds.
 struct OptimizedCpuStaticMeshPacketCell {
-    GmBoxAligned bounds{};
     u32 subtreeEntryCount = 0u;
     u32 triangleIndex = 0u;
     std::uint8_t depth = 0u;
     std::uint8_t containsTriangle = 0u;
-    // One-based index into the optional depth-two sibling-group stream.
-    // Zero preserves the ordinary per-cell traversal.
+    // One-based index into the optional sibling-group stream. Zero preserves
+    // the ordinary per-cell traversal.
     std::uint16_t packetGroupOrdinal = 0u;
+    GmBoxAligned bounds{};
 
     bool ContainsTriangle(void) const noexcept {
         return containsTriangle != 0u;
     }
 };
 
-// A conservative certificate for up to four consecutive depth-two sibling
+// A conservative certificate for up to eight consecutive sibling
 // roots. It stores the minimum and maximum child centers and the maximum child
 // half extent independently per axis. The packet traversal can prove that all
 // active query boxes reject every member without changing child ordering.
@@ -73,6 +79,11 @@ bool MeasureOptimizedCpuStaticMeshTraversalDepth(
 
 static_assert(std::is_standard_layout_v<
               OptimizedCpuStaticMeshDirectTrianglePosting>);
+static_assert(std::is_standard_layout_v<
+              OptimizedCpuStaticMeshPacketTriangleData>);
+static_assert(offsetof(OptimizedCpuStaticMeshPacketTriangleData, material) ==
+              sizeof(GmVec3) * 3u);
+static_assert(sizeof(OptimizedCpuStaticMeshPacketTriangleData) == 40u);
 static_assert(offsetof(OptimizedCpuStaticMeshDirectTrianglePosting,
                        triangleIndex) == sizeof(GmBoxAligned));
 static_assert(sizeof(OptimizedCpuStaticMeshDirectTrianglePosting) ==
@@ -82,6 +93,15 @@ static_assert(alignof(OptimizedCpuStaticMeshDirectTrianglePosting) ==
 static_assert(sizeof(OptimizedCpuStaticMeshPacketCell) == 36u);
 static_assert(alignof(OptimizedCpuStaticMeshPacketCell) ==
               alignof(GmBoxAligned));
+static_assert(offsetof(OptimizedCpuStaticMeshPacketCell,
+                       subtreeEntryCount) == 0u);
+static_assert(offsetof(OptimizedCpuStaticMeshPacketCell, triangleIndex) == 4u);
+static_assert(offsetof(OptimizedCpuStaticMeshPacketCell, depth) == 8u);
+static_assert(offsetof(OptimizedCpuStaticMeshPacketCell, containsTriangle) ==
+              9u);
+static_assert(offsetof(OptimizedCpuStaticMeshPacketCell, packetGroupOrdinal) ==
+              10u);
+static_assert(offsetof(OptimizedCpuStaticMeshPacketCell, bounds) == 12u);
 static_assert(sizeof(OptimizedCpuStaticMeshPacketGroup) == 48u);
 static_assert(alignof(OptimizedCpuStaticMeshPacketGroup) ==
               alignof(GmVec3));
@@ -97,11 +117,18 @@ public:
         return triangles_[triangleIndex];
     }
 
+    const OptimizedCpuStaticMeshPacketTriangleData &PacketTriangleAt(
+            u32 triangleIndex) const noexcept {
+        return packetTriangles_[triangleIndex];
+    }
+
     bool DirectCandidateTriangleSpan(
             const GmBoxAligned &query,
             OptimizedCpuStaticUniformGrid::CandidateSpan *result) const
             noexcept {
-        return triangleGrid_.DirectCandidateSpan(query, result) ||
+        return (triangleGrid_.IsAvailable() &&
+                triangleGrid_.DirectCandidateSpanForCertifiedQuery(
+                        query, result)) ||
                triangleBvh_.CandidateSpanFor(query, result);
     }
 
@@ -153,6 +180,7 @@ private:
     std::vector<std::uint8_t> traversalDepths_;
     std::vector<OptimizedCpuStaticMeshPacketCell> packetCells_;
     std::vector<OptimizedCpuStaticMeshPacketGroup> packetGroups_;
+    std::vector<OptimizedCpuStaticMeshPacketTriangleData> packetTriangles_;
     std::vector<OptimizedCpuStaticMeshTriangleData> triangles_;
     std::vector<OptimizedCpuStaticMeshDirectTrianglePosting>
             directTrianglePostings_;

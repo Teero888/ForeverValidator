@@ -11,13 +11,19 @@ namespace tmnf::simulation {
 class DeterministicExecutionScope {
 public:
     DeterministicExecutionScope();
-    ~DeterministicExecutionScope();
+    ~DeterministicExecutionScope() {
+        if (!restored_) {
+            Restore();
+        }
+    }
 
     DeterministicExecutionScope(const DeterministicExecutionScope &) = delete;
     DeterministicExecutionScope &operator=(
             const DeterministicExecutionScope &) = delete;
 
-    bool Established() const noexcept;
+    bool Established() const noexcept {
+        return established_ && !restored_;
+    }
     bool Restore() noexcept;
     static bool IsActive() noexcept;
 

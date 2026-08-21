@@ -6,7 +6,12 @@ constexpr long long MinHighFrequencyRunIntervalNanoseconds = 10000000ll;
 
 }  // namespace
 
+#if defined(__ELF__) && (defined(__GNUC__) || defined(__clang__))
+thread_local __attribute__((tls_model("initial-exec")))
+        CMwCmdBufferCore *CMwCmdBufferCore::TheCoreCmdBuffer = nullptr;
+#else
 thread_local CMwCmdBufferCore *CMwCmdBufferCore::TheCoreCmdBuffer = nullptr;
+#endif
 
 void CMwCmdBufferCore::HighFrequencyState::Reset(void) {
     lastRunStamp.reset();

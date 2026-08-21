@@ -141,9 +141,11 @@ bool BuildPreparedPacket(
 
 #if defined(__GNUC__) || defined(__clang__)
 #define FV_E031_AVX2 __attribute__((target("avx2")))
+#define FV_E031_HOT_AVX2 __attribute__((target("avx2"), aligned(32)))
 #define FV_E031_INLINE inline __attribute__((always_inline, target("avx2")))
 #else
 #define FV_E031_AVX2
+#define FV_E031_HOT_AVX2
 #define FV_E031_INLINE inline
 #endif
 
@@ -296,9 +298,11 @@ FV_E031_INLINE Vec3x8 TransformPoint(const Iso3x8 &transform,
                transform.translation);
 }
 
-// (1/256)^2. The margin the raw-edge inside test has to clear, squared so the
-// test itself needs no square root; see the note at its use.
-constexpr float EdgeInsideMarginSquared = 1.0f / 65536.0f;
+// A component-wise edge bound avoids computing the full squared length in the
+// overwhelmingly common clearly-inside case.  Since |edge| <= sqrt(3) *
+// maxAbs(edge), 7/1024 is conservatively above sqrt(3)/256: every lane
+// accepted by this test was also accepted by the old 1/256-length margin.
+constexpr float EdgeInsideComponentMargin = 7.0f / 1024.0f;
 
 FV_E031_INLINE Vec3x8 Normalize(const Vec3x8 &value,
                                 __m256 activeMask) {
@@ -500,8 +504,11 @@ FV_E031_INLINE __m256 BoundsMask(const Boxx8 &queries,
 struct PacketGroupQueryBounds {
     __m128 minimumCenter;
     __m128 maximumCenter;
-    __m128 maximumHalfExtents;
+    __m256 maximumHalfExtents;
+    GmBoxAligned directCandidateBounds;
 };
+
+FV_E031_INLINE float RoundPositiveExtentOutward(double extent);
 
 FV_E031_INLINE __m256i InvalidPacketGroupFloatLanes(
         __m256 values,
@@ -600,7 +607,7 @@ FV_E031_AVX2 bool BuildPacketGroupQueryBounds(
                     negativeInfinity, queries.center.y, laneMask)),
             HorizontalMaximum(_mm256_blendv_ps(
                     negativeInfinity, queries.center.x, laneMask)));
-    result->maximumHalfExtents = _mm_set_ps(
+    const __m128 maximumHalfExtents = _mm_set_ps(
             0.0f,
             HorizontalMaximum(_mm256_blendv_ps(
                     zero, queries.halfExtents.z, laneMask)),
@@ -608,34 +615,91 @@ FV_E031_AVX2 bool BuildPacketGroupQueryBounds(
                     zero, queries.halfExtents.y, laneMask)),
             HorizontalMaximum(_mm256_blendv_ps(
                     zero, queries.halfExtents.x, laneMask)));
+    result->maximumHalfExtents = _mm256_insertf128_ps(
+            _mm256_castps128_ps256(maximumHalfExtents),
+            maximumHalfExtents,
+            1);
+    alignas(16) std::array<float, 4u> minimumCenter;
+    alignas(16) std::array<float, 4u> maximumCenter;
+    alignas(16) std::array<float, 4u> maximumHalfExtentValues;
+    std::array<float, 3u> directCenter;
+    std::array<float, 3u> directHalfExtents;
+    _mm_store_ps(minimumCenter.data(), result->minimumCenter);
+    _mm_store_ps(maximumCenter.data(), result->maximumCenter);
+    _mm_store_ps(maximumHalfExtentValues.data(), maximumHalfExtents);
+    for (std::size_t axis = 0u; axis < 3u; ++axis) {
+        const double lower =
+                static_cast<double>(minimumCenter[axis]) -
+                maximumHalfExtentValues[axis];
+        const double upper =
+                static_cast<double>(maximumCenter[axis]) +
+                maximumHalfExtentValues[axis];
+        const double exactCenter = (lower + upper) * 0.5;
+        directCenter[axis] = static_cast<float>(exactCenter);
+        const double extent = std::max(
+                static_cast<double>(directCenter[axis]) - lower,
+                upper - static_cast<double>(directCenter[axis]));
+        directHalfExtents[axis] = RoundPositiveExtentOutward(extent);
+    }
+    result->directCandidateBounds = {
+        {directCenter[0u], directCenter[1u], directCenter[2u]},
+        {directHalfExtents[0u],
+         directHalfExtents[1u],
+         directHalfExtents[2u]},
+    };
     return true;
 }
 
 FV_E031_INLINE bool PacketGroupRejectsAll(
         const PacketGroupQueryBounds &queries,
         const OptimizedCpuStaticMeshPacketGroup &group) {
-    const __m128 groupMinimumCenter =
-            _mm_loadu_ps(&group.minimumCenter.x);
-    const __m128 groupMaximumCenter =
-            _mm_loadu_ps(&group.maximumCenter.x);
-    __m128 groupMaximumHalfExtents;
-    std::memcpy(
-            &groupMaximumHalfExtents,
-            &group.maximumHalfExtents.x,
-            sizeof(groupMaximumHalfExtents));
-    groupMaximumHalfExtents = _mm_blend_ps(
-            groupMaximumHalfExtents, _mm_setzero_ps(), 0x8);
-    const __m128 reach = _mm_add_ps(
+    const __m256 groupCenters =
+            _mm256_loadu_ps(&group.minimumCenter.x);
+    const __m256 packedQueryCenters = _mm256_loadu_ps(
+            reinterpret_cast<const float *>(&queries.minimumCenter));
+    const __m256 queryCenters = _mm256_permute2f128_ps(
+            packedQueryCenters, packedQueryCenters, 0x01);
+    __m256 centerDistances = _mm256_sub_ps(
+            groupCenters, queryCenters);
+    // The low half is groupMin-queryMax. Negate the high half so that it is
+    // queryMin-groupMax, then test both separation directions together.
+    centerDistances = _mm256_xor_ps(
+            centerDistances,
+            _mm256_castsi256_ps(_mm256_set_epi32(
+                    static_cast<int>(0x80000000u),
+                    static_cast<int>(0x80000000u),
+                    static_cast<int>(0x80000000u),
+                    static_cast<int>(0x80000000u),
+                    0,
+                    0,
+                    0,
+                    0)));
+    __m256 groupMaximumHalfExtents = _mm256_broadcast_ps(
+            reinterpret_cast<const __m128 *>(
+                    &group.maximumHalfExtents.x));
+    groupMaximumHalfExtents = _mm256_blend_ps(
+            groupMaximumHalfExtents, _mm256_setzero_ps(), 0x88);
+    const __m256 reach = _mm256_add_ps(
             groupMaximumHalfExtents, queries.maximumHalfExtents);
-    const __m128 rejectLeft = _mm_cmp_ps(
-            reach,
-            _mm_sub_ps(groupMinimumCenter, queries.maximumCenter),
-            _CMP_LT_OQ);
-    const __m128 rejectRight = _mm_cmp_ps(
-            reach,
-            _mm_sub_ps(queries.minimumCenter, groupMaximumCenter),
-            _CMP_LT_OQ);
-    return (_mm_movemask_ps(_mm_or_ps(rejectLeft, rejectRight)) & 0x7) != 0;
+    return (_mm256_movemask_ps(_mm256_cmp_ps(
+                    reach, centerDistances, _CMP_LT_OQ)) &
+            0x77) != 0;
+}
+
+FV_E031_INLINE float RoundPositiveExtentOutward(double extent) {
+    float rounded = static_cast<float>(extent);
+    if (static_cast<double>(rounded) < extent) {
+        std::uint32_t bits;
+        std::memcpy(&bits, &rounded, sizeof(bits));
+        ++bits;
+        std::memcpy(&rounded, &bits, sizeof(rounded));
+    }
+    return rounded;
+}
+
+FV_E031_INLINE GmBoxAligned PacketDirectCandidateBounds(
+        const PacketGroupQueryBounds &queries) {
+    return queries.directCandidateBounds;
 }
 
 struct PacketExecution {
@@ -819,7 +883,7 @@ struct PacketExecution {
     }
 
     FV_E031_INLINE void CollideTriangle(
-            const OptimizedCpuStaticMeshTriangleData &triangle,
+            const OptimizedCpuStaticMeshPacketTriangleData &triangle,
             __m256 candidateMask) {
         if (Bits(candidateMask) == 0u) {
             return;
@@ -927,15 +991,15 @@ struct PacketExecution {
                 const Vec3x8 rawNormal = Cross(rawEdge, triangleNormal);
                 const __m256 rawDistance = Dot(
                         Subtract(projectedPoint, edgeStart), rawNormal);
-                const __m256 negative = _mm256_cmp_ps(
-                        rawDistance, _mm256_setzero_ps(), _CMP_LT_OQ);
-                const __m256 clear = _mm256_cmp_ps(
-                        _mm256_mul_ps(
-                                _mm256_set1_ps(EdgeInsideMarginSquared),
-                                Dot(rawEdge, rawEdge)),
-                        _mm256_mul_ps(rawDistance, rawDistance),
-                        _CMP_LT_OQ);
-                if (Bits(AndNot(And(negative, clear), remaining)) == 0u) {
+                const __m256 maximumEdgeComponent = _mm256_max_ps(
+                        Abs(rawEdge.x),
+                        _mm256_max_ps(Abs(rawEdge.y), Abs(rawEdge.z)));
+                const __m256 clearlyInsideThreshold = _mm256_mul_ps(
+                        maximumEdgeComponent,
+                        _mm256_set1_ps(-EdgeInsideComponentMargin));
+                const __m256 clearlyInside = _mm256_cmp_ps(
+                        rawDistance, clearlyInsideThreshold, _CMP_LT_OQ);
+                if (Bits(AndNot(clearlyInside, remaining)) == 0u) {
                     continue;
                 }
             }
@@ -1027,7 +1091,7 @@ struct PacketExecution {
     }
 };
 
-FV_E031_AVX2 bool RunPacketAvx2(
+FV_E031_HOT_AVX2 bool RunPacketAvx2(
         const OptimizedCpuPreparedEllipsoidMeshPacket &setup,
         std::uint32_t activeMask,
         const GmIso4 &meshIso,
@@ -1064,15 +1128,17 @@ FV_E031_AVX2 bool RunPacketAvx2(
     // operands. Run it only when that sticky status is already set and the
     // default rounding/denormal controls are active; otherwise preserve the
     // authoritative per-cell path without executing extra floating work.
-    const bool usePacketGroups =
-            hierarchy.packetGroups != nullptr &&
-            hierarchy.packetGroupCount != 0u &&
+    const bool conservativePacketQueriesReady =
             (mxcsr & MxcsrControlMask) == DeterministicMxcsrControl &&
             (mxcsr & _MM_EXCEPT_INEXACT) != 0u &&
             BuildPacketGroupQueryBounds(
                     meshBounds, activeMask, &packetGroupQueries);
-    const std::uint16_t packetGroupOrdinalMask = usePacketGroups
-            ? std::numeric_limits<std::uint16_t>::max()
+    const bool usePacketGroups =
+            hierarchy.packetGroups != nullptr &&
+            hierarchy.packetGroupCount != 0u &&
+            conservativePacketQueriesReady;
+    const std::uint32_t packetGroupOrdinalMask = usePacketGroups
+            ? 0xffff0000u
             : 0u;
     PacketExecution execution{
         setup,
@@ -1089,6 +1155,38 @@ FV_E031_AVX2 bool RunPacketAvx2(
         0u,
     };
 
+    // The sidecar's direct candidates are a conservative posting list in the
+    // same flattened DFS triangle order as the authoritative hierarchy. Query
+    // it once with an outward-rounded envelope for all active lanes, then keep
+    // the exact packet leaf-bounds test below. This removes internal hierarchy
+    // traffic without changing triangle order or collision arithmetic.
+    OptimizedCpuStaticUniformGrid::CandidateSpan directCandidates;
+    if (conservativePacketQueriesReady &&
+        triangles.DirectCandidateTriangleSpan(
+                PacketDirectCandidateBounds(packetGroupQueries),
+                &directCandidates) &&
+        directCandidates.size <= 64u) {
+        for (std::size_t candidateIndex = 0u;
+             candidateIndex < directCandidates.size;
+             ++candidateIndex) {
+            const OptimizedCpuStaticMeshDirectTrianglePosting &posting =
+                    triangles.DirectTriangleAt(
+                            directCandidates.data[candidateIndex]);
+            const __m256 laneMask = BoundsMask(
+                    execution.meshBounds,
+                    posting.bounds,
+                    execution.packetMask);
+            if (Bits(laneMask) == 0u) {
+                continue;
+            }
+            execution.CollideTriangle(
+                    triangles.PacketTriangleAt(posting.triangleIndex),
+                    laneMask);
+        }
+        *hitMask = execution.hitMask;
+        return true;
+    }
+
     struct alignas(32) TraversalMask {
         __m256 value;
     };
@@ -1103,12 +1201,15 @@ FV_E031_AVX2 bool RunPacketAvx2(
     const OptimizedCpuStaticMeshPacketCell *const cellEnd =
             cell + hierarchy.count;
     while (cell != cellEnd) {
-        const std::size_t traversalDepth = cell->depth;
-        const std::uint16_t packetGroupOrdinal =
-                cell->packetGroupOrdinal & packetGroupOrdinalMask;
-        if (packetGroupOrdinal != 0u) {
+        std::uint32_t cellMetadata;
+        std::memcpy(&cellMetadata, &cell->depth, sizeof(cellMetadata));
+        const std::size_t traversalDepth = cellMetadata & 0xffu;
+        const std::uint32_t packetGroupOrdinalBits =
+                cellMetadata & packetGroupOrdinalMask;
+        if (packetGroupOrdinalBits != 0u) {
             const std::size_t groupIndex =
-                    static_cast<std::size_t>(packetGroupOrdinal - 1u);
+                    static_cast<std::size_t>(
+                            (packetGroupOrdinalBits >> 16u) - 1u);
             const OptimizedCpuStaticMeshPacketGroup &group =
                     hierarchy.packetGroups[groupIndex];
             if (PacketGroupRejectsAll(packetGroupQueries, group)) {
@@ -1128,7 +1229,7 @@ FV_E031_AVX2 bool RunPacketAvx2(
             cell += cell->subtreeEntryCount;
             continue;
         }
-        if (!cell->ContainsTriangle()) {
+        if ((cellMetadata & 0x100u) == 0u) {
             if (traversalDepth == traversalMasks.size()) {
                 return false;
             }
@@ -1139,8 +1240,8 @@ FV_E031_AVX2 bool RunPacketAvx2(
 
         const u32 triangleIndex = cell->triangleIndex;
         ++cell;
-        const OptimizedCpuStaticMeshTriangleData &triangle =
-                triangles.TriangleAt(triangleIndex);
+        const OptimizedCpuStaticMeshPacketTriangleData &triangle =
+                triangles.PacketTriangleAt(triangleIndex);
         // BoundsMask and every parent mask use canonical all-zero/all-one
         // lanes, so converting through movemask and rebuilding the vector is
         // redundant. Preserve the exact mask produced by the bounds test.
@@ -1151,6 +1252,7 @@ FV_E031_AVX2 bool RunPacketAvx2(
 }
 
 #undef FV_E031_AVX2
+#undef FV_E031_HOT_AVX2
 #undef FV_E031_INLINE
 
 #endif

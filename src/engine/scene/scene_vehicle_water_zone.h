@@ -11,6 +11,7 @@ public:
     void Configure(const WaterOccupancyGrid &occupancy,
                    float surfaceHeight,
                    float secondaryCullHeight);
+    bool IsEnabled(void) const noexcept { return enabled; }
     bool AcceptsRegion(const GmVec2 &sample,
                        float lowerY,
                        float upperY) const;

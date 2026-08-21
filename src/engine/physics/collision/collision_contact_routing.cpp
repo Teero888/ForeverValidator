@@ -20,16 +20,10 @@
 #include "engine/physics/geometry/plug_surface.h"
 #include "engine/rendering/plug_tree.h"
 
-SHmsSphereBufferContact *CHmsCollisionManager::SZone::EnsureTreeSphereContact(CPlugTree *tree) {
-    static_assert((TreeSphereContactCacheSize &
-                   (TreeSphereContactCacheSize - 1u)) == 0u);
-    const std::size_t cacheIndex =
-            (reinterpret_cast<std::uintptr_t>(tree) >> 4u) &
-            (TreeSphereContactCacheSize - 1u);
-    TreeSphereContactCacheEntry &cached = sphereContactCache[cacheIndex];
-    if (tree != nullptr && cached.tree == tree) {
-        return cached.contact;
-    }
+SHmsSphereBufferContact *
+CHmsCollisionManager::SZone::EnsureTreeSphereContactSlow(
+        CPlugTree *tree,
+        TreeSphereContactCacheEntry &cached) {
     for (TreeSphereContact &owned : ownedSphereContacts) {
         if (owned.tree == tree) {
             cached = {tree, owned.contact.get()};

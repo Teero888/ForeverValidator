@@ -23,7 +23,12 @@ using CSystemFidParameterFrameStack =
         std::vector<CSystemFidParameterFrame>;
 
 CSystemFidParameterFrameStack &CSystemFidParameterFrames(void) {
+#if defined(__ELF__) && (defined(__GNUC__) || defined(__clang__))
+    thread_local __attribute__((tls_model("initial-exec")))
+            CSystemFidParameterFrameStack frames;
+#else
     thread_local CSystemFidParameterFrameStack frames;
+#endif
     return frames;
 }
 

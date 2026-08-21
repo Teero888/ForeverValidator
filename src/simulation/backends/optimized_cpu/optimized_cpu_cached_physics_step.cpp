@@ -7,6 +7,7 @@
 #include "engine/physics/dynamics/hms_dyna.h"
 #include "engine/physics/world/hms_zone.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_surface_transform_cache.h"
+#include "simulation/backends/optimized_cpu/optimized_cpu_vehicle_forces.h"
 
 namespace {
 
@@ -36,14 +37,21 @@ void CHmsZoneDynamic::PhysicsStep2OptimizedCpuCachedImpl(
         forevervalidator::simulation::
                 OptimizedCpuVehicleForceContext *vehicleForceContext) {
     const auto detectCollisions =
-            [&transforms, nativeBinary32](
+            [&transforms, nativeBinary32, vehicleForceContext](
                     CHmsCollisionManagerSZone &collisionManagerZone,
                     CHmsCollisionBuffer &collisionBuffer,
                     CHmsCorpus *corpus) {
         if (nativeBinary32) {
             collisionManagerZone.
                     DetectCollisionsCorpusOptimizedCpuNativeBinary32Cached(
-                            collisionBuffer, corpus, transforms);
+                            collisionBuffer,
+                            corpus,
+                            transforms,
+                            vehicleForceContext == nullptr
+                                    ? nullptr
+                                    : vehicleForceContext->
+                                              CollisionBoundsPlanFor(
+                                                      corpus->CollisionTree()));
         } else {
             collisionManagerZone.DetectCollisionsCorpusOptimizedCpuCached(
                     collisionBuffer, corpus, transforms);

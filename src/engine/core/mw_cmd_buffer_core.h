@@ -39,7 +39,12 @@ private:
         void Reset(void);
     };
 
+#if defined(__ELF__) && (defined(__GNUC__) || defined(__clang__))
+    static thread_local __attribute__((tls_model("initial-exec")))
+            CMwCmdBufferCore *TheCoreCmdBuffer;
+#else
     static thread_local CMwCmdBufferCore *TheCoreCmdBuffer;
+#endif
 
     CMwTimerAdapter timer_;
     std::map<unsigned long, std::unique_ptr<CMwCmdBuffer>> schemeBuffers_;

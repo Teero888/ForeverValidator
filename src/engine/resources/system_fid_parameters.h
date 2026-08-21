@@ -89,7 +89,11 @@ public:
             CSystemFidParameters &collectedParams,
             CMwNod *owner) const;
     static void Pop(const CSystemFidParameters *params);
-    static void StaticRelease(void);
+    static void StaticRelease(void)
+#if defined(__GNUC__) || defined(__clang__)
+            __attribute__((cold, noinline))
+#endif
+            ;
     static std::size_t ActiveScopeCount(void) noexcept;
     static const CSystemFidParameters &GetCurrentParameters();
     static void Push(

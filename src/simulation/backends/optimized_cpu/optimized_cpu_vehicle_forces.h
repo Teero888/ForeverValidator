@@ -50,6 +50,12 @@ public:
     // specialization still declines on a circular-drift burnout, on gas and
     // brake together, and for any tuning it has no compiled model for.
     bool TryRefreshCollisionBounds(CPlugTree *root) noexcept override;
+    const OptimizedCpuVehicleCollisionBoundsPlan *CollisionBoundsPlanFor(
+            const CPlugTree *root) const noexcept {
+        return collisionBoundsPlan_.IsFor(root)
+                ? &collisionBoundsPlan_
+                : nullptr;
+    }
     // The car this context is specialized for, or null when it has none.
     CSceneVehicleCar *SpecializedCar(void) const noexcept { return car_; }
 

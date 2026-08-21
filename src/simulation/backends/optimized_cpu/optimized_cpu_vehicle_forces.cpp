@@ -721,6 +721,12 @@ struct OptimizedCpuVehicleForceAccess {
         }
     }
 
+    struct WheelVisualSteerTrigCache {
+        float sine = 0.0f;
+        float cosine = 1.0f;
+        bool ready = false;
+    };
+
     template<bool NativeBinary32>
     static FV_E019_ALWAYS_INLINE void UpdateWheelVisualState(
             CSceneVehicleCar &car,
@@ -728,7 +734,8 @@ struct OptimizedCpuVehicleForceAccess {
             CSceneVehicleCarTuning *tuning,
             float vehicleForwardSpeed,
             float dt,
-            float visualSpeedDenominator) {
+            float visualSpeedDenominator,
+            WheelVisualSteerTrigCache &steerTrigCache) {
         if constexpr (!NativeBinary32) {
             car.UpdateWheelVisualState(
                     wheel,
@@ -749,8 +756,13 @@ struct OptimizedCpuVehicleForceAccess {
                       visualSpeedDenominator;
             }
             if constexpr (NativeBinary32) {
-                const float sine = VehicleSin<true>(yaw);
-                const float cosine = VehicleCos<true>(yaw);
+                if (!steerTrigCache.ready) {
+                    steerTrigCache.sine = VehicleSin<true>(yaw);
+                    steerTrigCache.cosine = VehicleCos<true>(yaw);
+                    steerTrigCache.ready = true;
+                }
+                const float sine = steerTrigCache.sine;
+                const float cosine = steerTrigCache.cosine;
                 const GmVec3 oldX =
                         wheel.realTimeState.visualRotation.Row(GmAxis::X);
                 const GmVec3 oldZ =
@@ -815,6 +827,7 @@ struct OptimizedCpuVehicleForceAccess {
                     std::fabs(vehicleForwardSpeed) *
                             tuning->visual.wheelSpeedScale +
                     tuning->visual.wheelSpeedBase;
+            WheelVisualSteerTrigCache steerTrigCache;
             const u32 wheelCount = car.WheelGetCount();
             for (u32 wheelIndex = 0; wheelIndex < wheelCount; ++wheelIndex) {
                 CSceneVehicleCar::SSimulationWheel &wheel =
@@ -825,7 +838,8 @@ struct OptimizedCpuVehicleForceAccess {
                         tuning,
                         vehicleForwardSpeed,
                         dt,
-                        visualSpeedDenominator);
+                        visualSpeedDenominator,
+                        steerTrigCache);
             }
         }
 
@@ -1327,6 +1341,57 @@ struct OptimizedCpuVehicleForceAccess {
         return compiled.damperModulation.Evaluate(normalized);
     }
 
+    static FV_E019_ALWAYS_INLINE void ApplyModel6DirtSlideCompiled(
+            CSceneVehicleCar &car,
+            const CSceneVehicleCar::LegacyForceRequest &request,
+            const CSceneVehicleCarTuning &tuning,
+            const CSceneVehicleCar::Model6ForceState &state) {
+        if (!state.dirtSlideSurface ||
+            request.linearSpeed.z <= DirtSlideSpeedGate) {
+            return;
+        }
+        if (car.controls.lowSpeedGateB > LowSpeedGateThreshold) {
+            car.AddVehicleCentralForce({
+                    -DirtSlideSlowdownScale * request.linearSpeed.x,
+                    -DirtSlideSlowdownScale * request.linearSpeed.y,
+                    -DirtSlideSlowdownScale * request.linearSpeed.z,
+            });
+        }
+        if (car.controls.forcedLowSpeedFriction != 0 ||
+            car.controls.lowSpeedGateA <= LowSpeedGateThreshold ||
+            !car.CanApplyDirtSlideForces()) {
+            return;
+        }
+
+        const GmVec3 unitSpeed = SceneVehicleMath::NormalizeOr(
+                request.linearSpeed,
+                GmVec3{0.0f, 0.0f, 1.0f},
+                VectorEpsilonSquared);
+        const CSceneVehicleCar::DirtSlideForces slideForces =
+                car.BuildDirtSlideForces(
+                        &tuning, request.linearSpeed, unitSpeed);
+        const u32 slideWheelCount = car.WheelGetCount();
+        for (u32 slideWheelIndex = 0u;
+             slideWheelIndex < slideWheelCount;
+             ++slideWheelIndex) {
+            CSceneVehicleCar::SSimulationWheel &slideWheel =
+                    car.WheelAt(slideWheelIndex);
+            if (!slideWheel.realTimeState.slipping) {
+                continue;
+            }
+            if (slideWheelIndex <= 1u) {
+                car.AddVehicleForce(
+                        slideForces.front,
+                        slideWheel.forceApplicationPoint);
+            }
+            if (slideWheelIndex == 2u || slideWheelIndex == 3u) {
+                car.AddVehicleForce(
+                        slideForces.rear,
+                        slideWheel.forceApplicationPoint);
+            }
+        }
+    }
+
     template<bool NativeBinary32>
     static FV_E019_ALWAYS_INLINE void ApplyModel6ContactForcesCompiled(
             CSceneVehicleCar &car,
@@ -1447,10 +1512,7 @@ struct OptimizedCpuVehicleForceAccess {
             const GmVec3 contactSideForce = SceneVehicleMath::Scale(
                     contactSideAxis, requestedSideForce);
             // Between the two, exactly as ApplyModel6ContactWheel orders it.
-            // The reference implementation is called rather than restated: it
-            // is short, it runs only for a wheel in contact, and every force it
-            // adds goes through the same accumulators this path writes.
-            car.ApplyModel6DirtSlide(request, tuning, state);
+            ApplyModel6DirtSlideCompiled(car, request, tuning, state);
             AddVehicleCentralForce(car, dyna, contactSideForce);
         }
     }
@@ -2004,6 +2066,7 @@ void OptimizedCpuVehicleForceContext::BeginTick(
         CSceneVehicleCar &car,
         OptimizedCpuBinary32MathPath mathPath,
         CHmsItem::CCallback *enabledComputeForcesCallback) noexcept {
+    collisionBoundsPlan_.InvalidateDirectLaneSnapshot();
     tickEligible_ = false;
     if (mathPath != OptimizedCpuBinary32MathPath::X86Sse2 ||
         enabledComputeForcesCallback == nullptr ||
