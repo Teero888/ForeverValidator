@@ -342,8 +342,6 @@ bool BuildPacketGroups(
         std::vector<OptimizedCpuStaticMeshPacketCell> *packetCells,
         std::vector<OptimizedCpuStaticMeshPacketGroup> *groups) {
     constexpr std::size_t GroupWidth = 4u;
-    constexpr std::uint8_t ParentDepth = 1u;
-    constexpr std::uint8_t ChildDepth = ParentDepth + 1u;
     constexpr std::size_t MaximumGroupCount =
             std::numeric_limits<std::uint16_t>::max();
     if (packetCells == nullptr || groups == nullptr ||
@@ -353,13 +351,25 @@ bool BuildPacketGroups(
     groups->clear();
     groups->reserve(std::min(cells.size() / GroupWidth,
                              MaximumGroupCount));
+    // Every internal cell, not only the ones two levels down. A group is a
+    // conservative certificate over up to four consecutive sibling subtrees,
+    // and the test that reads it -- PacketGroupRejectsAll -- proves that every
+    // active lane misses every member, which is true at any depth. Grouping the
+    // whole tree rather than one level of it turns four bounds tests into one
+    // wherever a subtree is nowhere near the car, which in a traversal that
+    // rejects three cells in four is most of the work.
     for (std::size_t parentIndex = 0u;
          parentIndex < cells.size();
          ++parentIndex) {
-        if (depths[parentIndex] != ParentDepth ||
-            cells[parentIndex].ContainsTriangle()) {
+        if (cells[parentIndex].ContainsTriangle()) {
             continue;
         }
+        const std::uint8_t parentDepth = depths[parentIndex];
+        if (parentDepth == std::numeric_limits<std::uint8_t>::max()) {
+            continue;
+        }
+        const std::uint8_t childDepth =
+                static_cast<std::uint8_t>(parentDepth + 1u);
         const std::size_t parentEnd =
                 parentIndex + cells[parentIndex].SubtreeEntryCount();
         std::size_t childIndex = parentIndex + 1u;
@@ -369,7 +379,7 @@ bool BuildPacketGroups(
             std::size_t memberCount = 0u;
             bool bounded = true;
             while (childIndex < parentEnd && memberCount < GroupWidth) {
-                if (depths[childIndex] != ChildDepth) {
+                if (depths[childIndex] != childDepth) {
                     return false;
                 }
                 const GmMeshOctreeCell &child = cells[childIndex];

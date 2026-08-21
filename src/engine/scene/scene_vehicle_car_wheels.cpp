@@ -712,6 +712,13 @@ void CSceneVehicleCar::CreateFakeContacts() {
 
 void CSceneVehicleCar::RefreshCollisionTree() {
   CPlugTree *tree = HmsItem()->Solid()->CollisionTree();
+  // A bound refresh replays the same box transforms and unions in the same
+  // order; it declines whenever the tree is not the shape it was compiled for,
+  // and then the recursive walk below runs as it always did.
+  if (collisionBoundsRefresh != nullptr &&
+      collisionBoundsRefresh->TryRefreshCollisionBounds(tree)) {
+    return;
+  }
   tree->UpdateBoundingBox(0);
 }
 

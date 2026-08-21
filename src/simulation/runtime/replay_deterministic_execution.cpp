@@ -20,8 +20,25 @@ DeterministicExecutionScope::DeterministicExecutionScope() {
         return;
     }
 
-    if (std::fegetenv(&savedEnvironment_) != 0) {
-        return;
+    // std::fegetround is the whole of what this scope changes about the
+    // long-double environment: it asks for round-to-nearest below, and the
+    // check after that change refuses to establish the scope under anything
+    // else. So when the caller is already rounding to nearest, the environment
+    // saved here would be restored byte for byte, and saving it is pure cost.
+    //
+    // Worth avoiding, because the cost is not small. std::fegetenv and
+    // std::fesetenv compile to fnstenv and fldenv, both microcoded and together
+    // dearer than everything else this scope does; the MXCSR that the
+    // simulation actually runs on is captured and reinstated explicitly below
+    // either way, and nothing under this scope executes a long-double
+    // instruction, so the rest of what fnstenv saves cannot move. A search
+    // takes one of these per simulated tick, so it shows up.
+    const bool roundsToNearest = std::fegetround() == FE_TONEAREST;
+    if (!roundsToNearest) {
+        if (std::fegetenv(&savedEnvironment_) != 0) {
+            return;
+        }
+        environmentRestorable_ = true;
     }
     environmentCaptured_ = true;
     savedCommandBuffer_ = CMwCmdBufferCore::Current();
@@ -30,7 +47,7 @@ DeterministicExecutionScope::DeterministicExecutionScope() {
     savedMxcsr_ = _mm_getcsr();
 #endif
 
-    if (std::fesetround(FE_TONEAREST) != 0) {
+    if (!roundsToNearest && std::fesetround(FE_TONEAREST) != 0) {
         Restore();
         return;
     }
@@ -41,7 +58,8 @@ DeterministicExecutionScope::DeterministicExecutionScope() {
         return;
     }
 #endif
-    if (std::fegetround() != FE_TONEAREST) {
+    // Only worth re-reading when the constructor actually asked for a change.
+    if (!roundsToNearest && std::fegetround() != FE_TONEAREST) {
         Restore();
         return;
     }
@@ -79,7 +97,8 @@ bool DeterministicExecutionScope::Restore() noexcept {
     if (environmentCaptured_) {
         RestoreGameRandomState(savedRandomState_);
         CMwCmdBufferCore::RestoreCurrent(savedCommandBuffer_);
-        if (std::fesetenv(&savedEnvironment_) != 0) {
+        // Only when the constructor had something to put back; see there.
+        if (environmentRestorable_ && std::fesetenv(&savedEnvironment_) != 0) {
             success = false;
         }
 #if defined(__i386__) || defined(__x86_64__)

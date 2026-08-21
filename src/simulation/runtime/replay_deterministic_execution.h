@@ -29,6 +29,10 @@ private:
     unsigned int savedMxcsr_ = 0u;
 #endif
     bool environmentCaptured_ = false;
+    // Whether savedEnvironment_ holds anything. False on the common path, where
+    // the caller was already rounding to nearest and the constructor left the
+    // long-double environment alone rather than saving it.
+    bool environmentRestorable_ = false;
     bool established_ = false;
     bool restored_ = false;
     bool ownsActiveScope_ = false;

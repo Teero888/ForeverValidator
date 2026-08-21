@@ -362,6 +362,20 @@ struct ReplaySimulationRuntime::State : CHmsCollisionSubstepObserver {
     float finishSubstepDurationSeconds = 0.0f;
     std::optional<Snapshot> finishSubstepSnapshot;
     Snapshot finishTickSnapshot;
+
+    // Finish-time estimation needs the state as it stood before the tick the
+    // race completed on, and nothing knows which tick that is until it has run.
+    // What it does not need is a copy of every tick: the simulation is
+    // deterministic, so a snapshot every FinishRewindPeriod ticks plus the
+    // control ticks applied since carries the same information, and the one
+    // tick in a race that ever asks for it can replay forward to reconstruct it
+    // exactly. Copying the runtime and the race is about seven kilobytes, which
+    // at one tick in sixteen stops being a measurable share of a step.
+    static constexpr std::size_t FinishRewindPeriod = 16u;
+    Snapshot finishRewindSnapshot;
+    std::vector<ReplayControlTick> finishRewindTicks;
+    bool finishRewindSnapshotValid = false;
+    bool replayingFinishRewind = false;
 };
 
 void ReplaySimulationRuntime::State::BeforeCollisionSubstep(
@@ -653,13 +667,10 @@ ReplaySimulationRuntime::StepOptimizedCpuNativeBinary32(
     if (!state.definition->optimizedCpuStadiumSpecializationsEnabled) {
         return StepOptimizedCpu(tick);
     }
-    const bool finishPreCaptured =
-            !state.captureFinishTransition &&
-            !state.race.Progress().raceCompleted &&
-            CaptureRuntimeClone(state.finishTickSnapshot.runtime);
-    if (finishPreCaptured) {
-        state.race.CaptureRuntimeClone(state.finishTickSnapshot.race);
-    }
+    // This is the path a search runs millions of times, so it reconstructs the
+    // pre-tick state on the one tick that needs it rather than copying seven
+    // kilobytes on every tick that does not. See State::finishRewindSnapshot.
+    const bool finishRewindArmed = ArmFinishRewind(tick);
     state.phase = Phase::Stepping;
 
     if (!state.firstStep) {
@@ -728,13 +739,10 @@ ReplaySimulationRuntime::StepOptimizedCpuNativeBinary32(
                             state.world.CollisionZone())
             ? FinishProbeOptimizedCpuNativeBinary32Cached
             : FinishProbeOptimizedCpuNativeBinary32;
-    if (finishPreCaptured &&
-        !state.finishTickSnapshot.race.progress.raceCompleted &&
-        state.race.Progress().raceCompleted) {
-        EstimateFinishTime(
-                tick, finishPath,
-                state.finishTickSnapshot.runtime,
-                state.finishTickSnapshot.race);
+    // Arming established that the race was not complete before this tick, so a
+    // race that is complete now completed during it.
+    if (finishRewindArmed && state.race.Progress().raceCompleted) {
+        ResolveFinishRewind(tick, finishPath);
     }
     execution.finishTime = state.finishTime;
     return execution;
@@ -828,6 +836,98 @@ bool ReplaySimulationRuntime::ProbeFinishSubstep(
     const bool finished = state.race.Progress().raceCompleted;
     state.phase = Phase::Idle;
     return finished;
+}
+
+bool ReplaySimulationRuntime::ArmFinishRewind(const ReplayControlTick &tick) {
+    State &state = *state_;
+    if (state.replayingFinishRewind) {
+        // The rewind is driving these steps; the ring it is reading belongs to
+        // the resolve that started them.
+        return false;
+    }
+    if (state.captureFinishTransition ||
+        state.race.Progress().raceCompleted) {
+        state.finishRewindSnapshotValid = false;
+        state.finishRewindTicks.clear();
+        return false;
+    }
+    if (!state.finishRewindSnapshotValid ||
+        state.finishRewindTicks.size() >= State::FinishRewindPeriod) {
+        state.finishRewindSnapshotValid = false;
+        if (!CaptureRuntimeClone(state.finishRewindSnapshot.runtime)) {
+            state.finishRewindTicks.clear();
+            return false;
+        }
+        state.race.CaptureRuntimeClone(state.finishRewindSnapshot.race);
+        state.finishRewindTicks.clear();
+        state.finishRewindSnapshotValid = true;
+    }
+    state.finishRewindTicks.push_back(tick);
+    return true;
+}
+
+void ReplaySimulationRuntime::ResolveFinishRewind(
+        const ReplayControlTick &tick,
+        std::uint8_t physicsPath) {
+    State &state = *state_;
+    if (!state.finishRewindSnapshotValid ||
+        state.finishRewindTicks.empty()) {
+        return;
+    }
+    // What the finishing tick produced. Everything below has to put it back,
+    // because the caller's next step continues from here.
+    std::optional<RuntimeClone> postRuntime = CaptureRuntimeClone();
+    if (!postRuntime.has_value()) {
+        return;
+    }
+    CTrackManiaRace::RuntimeClone postRace = state.race.CaptureRuntimeClone();
+
+    // Rewind to the periodic snapshot and replay forward to the tick before the
+    // one that finished. The simulation is deterministic and a runtime clone is
+    // a complete state, so this reproduces exactly what a per-tick capture
+    // would have been holding.
+    RuntimeClone rewound = state.finishRewindSnapshot.runtime;
+    CTrackManiaRace::RuntimeClone rewoundRace = state.finishRewindSnapshot.race;
+    bool reconstructed = state.race.PrepareRuntimeCloneRestore(rewoundRace) &&
+                         PrepareRuntimeCloneRestore(rewound);
+    if (reconstructed) {
+        state.race.RestoreRuntimeClone(std::move(rewoundRace));
+        RestoreRuntimeClone(std::move(rewound));
+        state.replayingFinishRewind = true;
+        const std::size_t count = state.finishRewindTicks.size();
+        for (std::size_t index = 0u; index + 1u < count; ++index) {
+            if (StepOptimizedCpuNativeBinary32(
+                        state.finishRewindTicks[index]).result !=
+                ReplaySimulationRunResult::Success) {
+                reconstructed = false;
+                break;
+            }
+        }
+        state.replayingFinishRewind = false;
+    }
+
+    std::optional<RuntimeClone> preTickRuntime;
+    CTrackManiaRace::RuntimeClone preTickRace;
+    if (reconstructed) {
+        preTickRuntime = CaptureRuntimeClone();
+        preTickRace = state.race.CaptureRuntimeClone();
+        reconstructed = preTickRuntime.has_value();
+    }
+
+    CTrackManiaRace::RuntimeClone restoreRace = postRace;
+    RuntimeClone restoreRuntime = *postRuntime;
+    if (!state.race.PrepareRuntimeCloneRestore(restoreRace) ||
+        !PrepareRuntimeCloneRestore(restoreRuntime)) {
+        return;
+    }
+    state.race.RestoreRuntimeClone(std::move(restoreRace));
+    RestoreRuntimeClone(std::move(restoreRuntime));
+
+    if (reconstructed) {
+        EstimateFinishTime(tick, physicsPath,
+                           std::move(*preTickRuntime),
+                           std::move(preTickRace));
+    }
 }
 
 void ReplaySimulationRuntime::EstimateFinishTime(

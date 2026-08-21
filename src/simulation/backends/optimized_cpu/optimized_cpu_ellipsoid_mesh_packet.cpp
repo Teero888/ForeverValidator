@@ -296,6 +296,10 @@ FV_E031_INLINE Vec3x8 TransformPoint(const Iso3x8 &transform,
                transform.translation);
 }
 
+// (1/256)^2. The margin the raw-edge inside test has to clear, squared so the
+// test itself needs no square root; see the note at its use.
+constexpr float EdgeInsideMarginSquared = 1.0f / 65536.0f;
+
 FV_E031_INLINE Vec3x8 Normalize(const Vec3x8 &value,
                                 __m256 activeMask) {
     const __m256 lengthSquared = Dot(value, value);
@@ -897,8 +901,46 @@ struct PacketExecution {
             const std::size_t nextIndex = edgeIndex == 2u ? 0u : edgeIndex + 1u;
             const Vec3x8 edgeStart = vertices[edgeIndex];
             const Vec3x8 edgeEnd = vertices[nextIndex];
-            Vec3x8 edgeDirection = Subtract(edgeEnd, edgeStart);
-            edgeDirection = Normalize(edgeDirection, remaining);
+            const Vec3x8 rawEdge = Subtract(edgeEnd, edgeStart);
+
+            // The cheap half of this test decides it almost every time.
+            //
+            // An edge whose signed distance is negative for every lane still in
+            // play leaves the iteration a no-op: nothing can be rejected,
+            // because edgeReach is a square root and so never below zero, and
+            // nothing is outside, because that wants a positive distance. Only
+            // the sign is needed to know that, and the sign does not depend on
+            // normalizing the edge -- Normalize only ever scales by a positive
+            // factor, or leaves the vector alone. So the sign of the same
+            // product built from the raw edge answers it, without the square
+            // root and the division that normalizing costs.
+            //
+            // The comparison is against the edge length rather than zero, so
+            // that the margin means the same thing on a triangle of any size:
+            // the distance the normalized form would produce is this one over
+            // the edge length, and requiring it to clear 1/256 of a unit-sphere
+            // radius puts it four orders of magnitude clear of anything
+            // rounding can do to the sign. A lane nearer the boundary than that
+            // simply falls through to the exact path below, which is where
+            // roughly one iteration in five hundred ends up.
+            {
+                const Vec3x8 rawNormal = Cross(rawEdge, triangleNormal);
+                const __m256 rawDistance = Dot(
+                        Subtract(projectedPoint, edgeStart), rawNormal);
+                const __m256 negative = _mm256_cmp_ps(
+                        rawDistance, _mm256_setzero_ps(), _CMP_LT_OQ);
+                const __m256 clear = _mm256_cmp_ps(
+                        _mm256_mul_ps(
+                                _mm256_set1_ps(EdgeInsideMarginSquared),
+                                Dot(rawEdge, rawEdge)),
+                        _mm256_mul_ps(rawDistance, rawDistance),
+                        _CMP_LT_OQ);
+                if (Bits(AndNot(And(negative, clear), remaining)) == 0u) {
+                    continue;
+                }
+            }
+
+            const Vec3x8 edgeDirection = Normalize(rawEdge, remaining);
             const Vec3x8 edgeNormal =
                     Cross(edgeDirection, triangleNormal);
             const __m256 edgeDistance = Dot(

@@ -192,6 +192,15 @@ void CSceneVehicleCar::ClearWheelSurfaceObserver(void) {
   wheelSurfaceObserver = nullptr;
 }
 
+void CSceneVehicleCar::BindCollisionBoundsRefresh(
+    CSceneVehicleCarCollisionBoundsRefresh &refresh) {
+  collisionBoundsRefresh = &refresh;
+}
+
+void CSceneVehicleCar::ClearCollisionBoundsRefresh(void) {
+  collisionBoundsRefresh = nullptr;
+}
+
 bool CSceneVehicleCar::WheelSurfaceObserverPreservesDynamics(void) const
     noexcept {
   return wheelSurfaceObserver == nullptr ||

@@ -21,6 +21,7 @@
 void OrderWindowedValues(float &first, float &second, float period);
 
 class CSceneVehicleCarWheelSurfaceObserver;
+class CSceneVehicleCarCollisionBoundsRefresh;
 struct OptimizedCpuVehicleForceAccess;
 struct CudaVehicleCpuReferenceAccess;
 
@@ -263,6 +264,7 @@ private:
   std::optional<std::reference_wrapper<CSceneVehicleStruct>> vehicleStruct;
   std::optional<std::reference_wrapper<CSceneSoundSource>> turboSoundSource;
   CSceneVehicleCarWheelSurfaceObserver *wheelSurfaceObserver = nullptr;
+  CSceneVehicleCarCollisionBoundsRefresh *collisionBoundsRefresh = nullptr;
   std::vector<SSimulationWheel> wheels;
   SControls controls;
   SFeedback feedback;
@@ -327,6 +329,9 @@ public:
   void BindWheelSurfaceObserver(CSceneVehicleCarWheelSurfaceObserver &observer);
   void ClearWheelSurfaceObserver(void);
   bool WheelSurfaceObserverPreservesDynamics(void) const noexcept;
+  void BindCollisionBoundsRefresh(
+      CSceneVehicleCarCollisionBoundsRefresh &refresh);
+  void ClearCollisionBoundsRefresh(void);
   RuntimeClone CaptureRuntimeClone(void) const;
   void CaptureRuntimeClone(RuntimeClone &clone) const;
   bool CanRestoreRuntimeClone(const RuntimeClone &clone) const noexcept;
@@ -747,6 +752,16 @@ struct CSceneVehicleCar::SSimulationWheel {
   void ApplySingleMaterialRefFromTuning(const CSceneVehicleCarTuning &tuning);
   void CopyRestSurfaceIso();
   void OffsetCurrentSurfaceY(float yOffset);
+};
+
+// A backend may offer a refresh that reproduces RefreshCollisionTree's boxes
+// exactly while skipping the recursive virtual traversal and the decoration
+// discovery that goes with it. Returning false leaves the recursive walk to
+// run, so binding one is never a commitment that it applies.
+class CSceneVehicleCarCollisionBoundsRefresh {
+public:
+  virtual ~CSceneVehicleCarCollisionBoundsRefresh() = default;
+  virtual bool TryRefreshCollisionBounds(CPlugTree *root) noexcept = 0;
 };
 
 class CSceneVehicleCarWheelSurfaceObserver {

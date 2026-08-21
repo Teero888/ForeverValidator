@@ -123,6 +123,11 @@ public:
     Phase CurrentPhase() const noexcept;
 
 private:
+    // The two halves of reconstructing a pre-tick state on demand rather than
+    // keeping one for every tick; see State::finishRewindSnapshot.
+    bool ArmFinishRewind(const ReplayControlTick &tick);
+    void ResolveFinishRewind(const ReplayControlTick &tick,
+                             std::uint8_t physicsPath);
     void EstimateFinishTime(
             const ReplayControlTick &tick,
             std::uint8_t physicsPath,

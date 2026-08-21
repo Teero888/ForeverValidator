@@ -394,11 +394,6 @@ struct OptimizedCpuVehicleForceAccess {
             car.controls.lowSpeedGateB > LowSpeedGateThreshold) {
             return false;
         }
-        for (const CSceneVehicleCar::SSimulationWheel &wheel : car.wheels) {
-            if (wheel.realTimeState.contactMaterial == DirtSlideMaterial) {
-                return false;
-            }
-        }
         GmVec3 linearSpeed;
         dyna.GetLinearSpeed(linearSpeed);
         return std::isfinite(linearSpeed.x) &&
@@ -1451,6 +1446,11 @@ struct OptimizedCpuVehicleForceAccess {
 
             const GmVec3 contactSideForce = SceneVehicleMath::Scale(
                     contactSideAxis, requestedSideForce);
+            // Between the two, exactly as ApplyModel6ContactWheel orders it.
+            // The reference implementation is called rather than restated: it
+            // is short, it runs only for a wheel in contact, and every force it
+            // adds goes through the same accumulators this path writes.
+            car.ApplyModel6DirtSlide(request, tuning, state);
             AddVehicleCentralForce(car, dyna, contactSideForce);
         }
     }
@@ -1744,7 +1744,11 @@ struct OptimizedCpuVehicleForceAccess {
         state.frameY = car.gearedDrive.frameIso.rotation.basisY.y;
         state.waterActive = car.ApplyWaterForces(currentForce);
         car.controls.noGroundFrictionGuard = state.waterActive != 0;
-        state.dirtSlideSurface = false;
+        // The reference derives this here, before the burnout check and the
+        // contact pass, and the dirt-slide forces it gates are what kept this
+        // whole specialization off any track with a slippery surface on it.
+        state.dirtSlideSurface =
+                car.AllWheelsContactMaterial(DirtSlideMaterial) != 0;
         state.tick = CMwCmdBufferCore::Current()->Timer().GetTickTime();
         state.slipSeen = car.AdvanceBurnoutPhases(&tuning, state.tick);
         const float speedKilometersPerHour =
@@ -2123,6 +2127,17 @@ bool OptimizedCpuVehicleForceContext::WouldUseSpecializationFor(
                    canonicalCallback_;
 }
 
+bool OptimizedCpuVehicleForceContext::TryRefreshCollisionBounds(
+        CPlugTree *root) noexcept {
+    // TryRefresh, not RefreshRuntimeCertified: the specialization earns the
+    // unchecked variant by having certified the item and the callback first,
+    // and none of that has been established on this path. The check is a
+    // handful of pointer comparisons and one box compare per child, which is
+    // still far less than the recursive traversal it replaces.
+    return root != nullptr && collisionBoundsPlan_.IsFor(root) &&
+           collisionBoundsPlan_.TryRefresh();
+}
+
 bool OptimizedCpuVehicleForceContext::TryComputeOwnerForces(
         CHmsCorpus *corpus,
         float dt) {
@@ -2238,7 +2253,22 @@ void CHmsZoneDynamic::ComputeCorpusForcesOptimizedCpuVehicle(
     }
 
     if (!context.TryComputeOwnerForces(corpus, dt)) {
-        corpus->ComputeOwnerForces(dt);
+        // Bound only for the duration of the call that can use it, so the
+        // context never outlives its own binding on the car, and only when the
+        // context is the one for this corpus -- otherwise the plan it holds
+        // describes a different car's tree and would decline anyway.
+        CSceneVehicleCar *car =
+                corpus != nullptr &&
+                                context.WouldUseSpecializationFor(corpus->Item())
+                        ? context.SpecializedCar()
+                        : nullptr;
+        if (car != nullptr) {
+            car->BindCollisionBoundsRefresh(context);
+            corpus->ComputeOwnerForces(dt);
+            car->ClearCollisionBoundsRefresh();
+        } else {
+            corpus->ComputeOwnerForces(dt);
+        }
     }
 }
 
